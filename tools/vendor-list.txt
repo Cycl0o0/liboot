@@ -1,0 +1,26 @@
+# Selected translation units (the header/declaration closure is preserved
+# separately under src/decomp). See NOTICE.md for provenance and patch status.
+src/overlays/actors/ovl_player_actor/z_player.c
+# v0.4: real Navi (EnElf)
+src/overlays/actors/ovl_En_Elf/z_en_elf.c
+# v0.6: real projectile actors
+src/overlays/actors/ovl_En_Arrow/z_en_arrow.c
+src/overlays/actors/ovl_En_Bom/z_en_bom.c
+src/overlays/actors/ovl_En_Boom/z_en_boom.c
+src/overlays/actors/ovl_Arms_Hook/z_arms_hook.c
+src/code/z_player_lib.c
+src/code/z_skelanime.c
+src/code/z_bgcheck.c
+src/code/z_actor.c
+src/code/z_lib.c
+src/code/sys_math.c
+src/code/sys_math3d.c
+src/code/sys_math_atan.c
+src/code/sys_matrix.c
+src/code/z_skin_matrix.c
+src/code/TwoHeadArena.c
+src/libc64/qrand.c
+src/libc64/math64.c
+src/libultra/gu/sins.c
+src/libultra/gu/coss.c
+src/libultra/gu/mtxutil.c
