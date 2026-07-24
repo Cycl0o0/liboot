@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Cycl0o0
+
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  make:
+    name: Make and playground
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Check version consistency
+        run: tools/check-version.sh
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential pkg-config libsdl2-dev libgl1-mesa-dev mono-mcs
+
+      - name: Build library
+        run: make --jobs="$(nproc)"
+
+      - name: Verify distributable notices
+        run: |
+          test -f dist/LICENSE
+          test -f dist/NOTICE.md
+          test -f dist/README.md
+          test -f dist/docs/GETTING_STARTED.md
+          test -f dist/docs/UNIVERSAL_SDK.md
+          test -f dist/docs/ENGINE_INTEGRATION.md
+          test -f dist/docs/FIDELITY.md
+          test -f dist/bindings/README.md
+          test -f dist/bindings/cpp/liboot.hpp
+          test -f dist/bindings/csharp/LibOot.cs
+          test -f dist/bindings/csharp/README.md
+
+      - name: Verify public headers, bindings, and ABI
+        run: |
+          printf '%s\n' '#include <liboot_engine.h>' \
+            'int main(void) { OoTEngineInput input = OOT_ENGINE_INPUT_INIT; return input.structSize == 0u; }' \
+            | cc -x c -std=c11 -Wall -Wextra -Wpedantic -Werror \
+                -Idist/include -c -o "$RUNNER_TEMP/public-c.o" -
+          printf '%s\n' '#include <liboot.hpp>' \
+            'int main() { auto input = liboot::default_input(); return input.structSize == 0u; }' \
+            | c++ -x c++ -std=c++11 -Wall -Wextra -Wpedantic -Werror \
+                -Idist/include -c -o "$RUNNER_TEMP/public-cpp.o" -
+          mcs -unsafe -warnaserror -target:library \
+            -out:"$RUNNER_TEMP/LibOot.dll" bindings/csharp/LibOot.cs
+          mcs -unsafe -warnaserror -out:"$RUNNER_TEMP/csharp-init-test.exe" \
+            bindings/csharp/LibOot.cs test/csharp_init_test.cs
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/dist" \
+            mono "$RUNNER_TEMP/csharp-init-test.exe"
+          tools/check-symbols.sh dist/liboot.so
+
+      - name: Build basic example
+        run: make --directory=examples --jobs="$(nproc)"
+
+      - name: Build headless test programs
+        run: make --directory=test --jobs="$(nproc)"
+
+      - name: Run synthetic parser, trace, and audio arithmetic checks
+        run: |
+          ./test/engine_init_test
+          ./test/rom_util_test
+          ./test/audio_overflow_test
+          ./test/fidelity_runner --self-test
+
+      - name: Run ROM parser checks with sanitizers
+        run: |
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc \
+            test/rom_util_test.c src/rom_util.c \
+            -o "$RUNNER_TEMP/rom-util-sanitized"
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+          UBSAN_OPTIONS=halt_on_error=1 \
+            "$RUNNER_TEMP/rom-util-sanitized"
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            test/audio_overflow_test.c \
+            -o "$RUNNER_TEMP/audio-overflow-sanitized"
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 \
+            "$RUNNER_TEMP/audio-overflow-sanitized"
+
+      - name: Build and test the complete library with sanitizers
+        run: make sanitizers
+
+      - name: Build SDL/OpenGL playground
+        run: make --directory=test playground
+
+  cmake:
+    name: CMake ${{ matrix.os }} (${{ matrix.kind }})
+    runs-on: ${{ matrix.os }}
+    # ubuntu (x86_64/arm64) and macOS are the supported build targets. Windows
+    # is not built yet: the vendored decomp assumes an N64/ILP32 libc (e.g. a
+    # 32-bit size_t in src/decomp/include/libc) that needs a dedicated porting
+    # pass, tracked separately.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        kind: [shared, static]
+    env:
+      INSTALL_PREFIX: ${{ github.workspace }}/stage/${{ matrix.kind }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Check version consistency
+        shell: bash
+        run: tools/check-version.sh
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake ninja-build pkg-config
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja pkg-config
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DBUILD_SHARED_LIBS=${{ matrix.kind == 'shared' && 'ON' || 'OFF' }}
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_INSTALL_LIBDIR=lib
+          -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run CMake tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Install
+        run: cmake --install build --config Release
+
+      - name: Verify installed package metadata
+        shell: bash
+        run: |
+          test -f "$INSTALL_PREFIX/include/liboot/liboot.h"
+          test -f "$INSTALL_PREFIX/include/liboot/liboot_engine.h"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/LICENSE"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/NOTICE.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/docs/ENGINE_INTEGRATION.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/docs/FIDELITY.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/bindings/csharp/LibOot.cs"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/bindings/csharp/README.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/examples/engine.c"
+          test -f "$INSTALL_PREFIX/lib/cmake/liboot/libootConfig.cmake"
+
+      - name: Verify pkg-config and CMake package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          test -f "$INSTALL_PREFIX/lib/pkgconfig/liboot.pc"
+          export PKG_CONFIG_PATH="$INSTALL_PREFIX/lib/pkgconfig"
+          pkg-config --validate liboot
+          printf '%s\n' '#include <liboot_engine.h>' \
+            'int main(void) { return oot_engine_api_version() == OOT_ENGINE_API_VERSION ? 0 : 1; }' \
+            | cc -x c -o "$RUNNER_TEMP/liboot-package-smoke" - \
+                $(pkg-config --cflags --libs --static liboot)
+          cmake --find-package -DNAME=liboot -DCOMPILER_ID=GNU -DLANGUAGE=C \
+            -DMODE=EXIST -DCMAKE_PREFIX_PATH="$INSTALL_PREFIX"
+
+      - name: Verify exported ABI (shared)
+        if: matrix.kind == 'shared'
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   lib="$INSTALL_PREFIX/lib/liboot.so" ;;
+            macOS)   lib="$INSTALL_PREFIX/lib/liboot.dylib" ;;
+          esac
+          tools/check-symbols.sh "$lib"
+
+      - name: Verify ELF soname (Linux shared)
+        if: runner.os == 'Linux' && matrix.kind == 'shared'
+        run: |
+          test -L "$INSTALL_PREFIX/lib/liboot.so.0.8"
+          readelf -d "$INSTALL_PREFIX/lib/liboot.so.0.8.0" \
+            | grep -F 'Library soname: [liboot.so.0.8]'

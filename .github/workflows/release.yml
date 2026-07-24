@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Cycl0o0
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # Linux (x86_64/arm64) and macOS (universal2) are the released targets.
+    # Windows is not built yet (the vendored decomp needs an N64/ILP32 libc
+    # porting pass); add a windows-x64 entry here once that lands.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,    os: ubuntu-latest,     extra: '' }
+          - { name: linux-arm64,     os: ubuntu-24.04-arm,  extra: '' }
+          - { name: macos-universal, os: macos-latest,
+              extra: '-DCMAKE_OSX_ARCHITECTURES=x86_64\;arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' }
+    env:
+      INSTALL_PREFIX: ${{ github.workspace }}/stage
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      # On a tag build, also require the tag to equal the pinned version.
+      - name: Check version consistency
+        shell: bash
+        run: tools/check-version.sh "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}"
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake ninja-build
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DBUILD_SHARED_LIBS=ON
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_INSTALL_LIBDIR=lib
+          -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX"
+          ${{ matrix.extra }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Install
+        run: cmake --install build --config Release
+
+      - name: Ad-hoc codesign the dylib (macOS)
+        if: runner.os == 'macOS'
+        run: find "$INSTALL_PREFIX/lib" -name 'liboot*.dylib' -type f -exec codesign -f -s - {} +
+
+      - name: Verify exported ABI
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   lib="$INSTALL_PREFIX/lib/liboot.so" ;;
+            macOS)   lib="$INSTALL_PREFIX/lib/liboot.dylib" ;;
+          esac
+          tools/check-symbols.sh "$lib"
+
+      - name: Package archive + checksum
+        shell: bash
+        run: |
+          archive="liboot-${{ github.ref_name }}-${{ matrix.name }}.tar.gz"
+          tar czf "$archive" -C "$INSTALL_PREFIX" .
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          ls -l "$archive" "$archive.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: liboot-*.tar.gz*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-artifacts/liboot-*.tar.gz*
+          generate_release_notes: true
+          # A tag containing a hyphen (e.g. v0.9.0-rc1) is a pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
