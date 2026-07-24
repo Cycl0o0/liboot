@@ -25,6 +25,7 @@ compile_commands.json
 /test/audio_overflow_test
 /test/audio_catalog_test
 /test/audio_sequence_test
+/test/enemy_bgm_test
 /test/fidelity_runner
 /test/playground
 /examples/basic
