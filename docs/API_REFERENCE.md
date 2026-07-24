@@ -396,6 +396,7 @@ OoTResult oot_engine_texture_count(OoTEngine *engine, uint32_t *outCount);
 OoTResult oot_engine_texture_get(OoTEngine *engine, uint32_t index, OoTEngineTexture *outTexture);
 OoTResult oot_engine_voice_get(OoTEngine *engine, uint16_t sfxId, OoTEnginePcm *outPcm);
 OoTResult oot_engine_ocarina_note_get(OoTEngine *engine, uint8_t noteIndex, OoTEnginePcm *outPcm);
+OoTResult oot_engine_set_enemy_bgm(OoTEngine *engine, uint8_t enabled); /* opt-in proximity battle BGM */
 ```
 
 Music playback, the AudioSeq mixer, the SFX catalog, and the Ocarina song table
@@ -763,6 +764,12 @@ bool        oot_audio_sfx_catalog_get(int32_t catalogIndex, struct OoTSfxInfo *o
 bool        oot_audio_sfx_play(uint16_t sfxId, float pan, float volume);
 void        oot_audio_sfx_stop(uint16_t sfxId);
 void        oot_audio_sfx_stop_all(void);
+
+/* Opt-in proximity battle BGM (disabled by default). Plays NA_BGM_ENEMY while a
+   hostile enemy is within OoT's 500-unit battle range of Link. player 0xFF keeps
+   the default (OOT_AUDIO_PLAYER_SUB); seqId 0 keeps NA_BGM_ENEMY (0x1C). */
+bool        oot_audio_set_enemy_bgm(bool enabled, uint8_t player, uint16_t seqId, uint16_t fadeMs);
+bool        oot_audio_get_enemy_bgm(bool *outActive, float *outDistance); /* returns enabled */
 ```
 
 `oot_audio_render_f32` overwrites (does not accumulate) its buffer and allocates

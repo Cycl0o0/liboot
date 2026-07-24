@@ -167,7 +167,9 @@ cull/alpha-test/decal flags.
 callback with pitch, volume, reverb, and position. A native mixer renders the
 ROM's 110 sequences through the four retail players, 38 soundfonts, and seven
 sample banks to interleaved stereo F32 at the host rate, allocation-free, with
-fades, all 19 nature-ambience presets, and a 1,259-entry SFX selector.
+fades, all 19 nature-ambience presets, and a 1,259-entry SFX selector. An
+opt-in proximity driver plays the OoT battle theme while a hostile enemy is
+near Link, using the game's own enemy-proximity trigger.
 
 **Targeting.** Host-owned Z-targets backed by OoT's real Attention system, with
 lock, strafing, auto-facing, and release. The real EnElf actor supplies Navi.

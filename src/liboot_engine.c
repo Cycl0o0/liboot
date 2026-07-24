@@ -1602,3 +1602,15 @@ OoTResult oot_engine_ocarina_note_get(OoTEngine *engine, uint8_t noteIndex,
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
 }
+
+OoTResult oot_engine_set_enemy_bgm(OoTEngine *engine, uint8_t enabled)
+{
+    OoTResult result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    /* 0xFF player / 0 seqId keep the defaults (OOT_AUDIO_PLAYER_SUB, NA_BGM_ENEMY). */
+    oot_audio_set_enemy_bgm(enabled != 0u, 0xFFu, 0u, 400u);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}

@@ -2137,3 +2137,89 @@ void liboot_audio_sequence_reset( void )
         for( int c = 0; c < SEQ_CHANNELS; ++c ) channel_reset( &s_players[p].channels[c], 0 );
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/* liboot vNEXT: proximity-driven enemy/battle BGM.                           */
+/*                                                                            */
+/* OoT already decides "enemy near": the vendored z_actor.c tracks the        */
+/* nearest hostile actor within SQ(500) as actorCtx.attention.bgmEnemy, and   */
+/* the vendored z_player.c calls Audio_SetBgmEnemyVolume(dist) each tick one   */
+/* is in range. liboot's shim forwards that distance to liboot_enemy_bgm_     */
+/* signal(); this driver, run once per oot_link_tick, plays the battle        */
+/* sequence on a dedicated player while an enemy is in range, scales its      */
+/* volume with proximity, and fades it out when none remain. Opt-in.          */
+
+#define LIBOOT_BGM_ENEMY    0x1Cu   /* NA_BGM_ENEMY (sequence_table.h Sequence_26) */
+#define ENEMY_BGM_RANGE     500.0f  /* sqrt of OoT's SQ(500) battle range */
+
+static struct {
+    bool     enabled;
+    uint8_t  player;    /* SEQ player carrying the battle theme */
+    uint16_t seqId;     /* battle sequence id */
+    uint16_t fadeMs;    /* fade in/out */
+    bool     signaled;  /* Audio_SetBgmEnemyVolume fired this tick */
+    float    tickDist;  /* nearest in-range enemy distance accumulated this tick */
+    float    lastDist;  /* distance reported by the most recent tick (for the getter) */
+    bool     active;    /* battle sequence currently playing */
+} s_enemyBgm = { false, OOT_AUDIO_PLAYER_SUB, LIBOOT_BGM_ENEMY, 400u,
+                 false, ENEMY_BGM_RANGE, ENEMY_BGM_RANGE, false };
+
+void liboot_enemy_bgm_signal( float dist )
+{
+    s_enemyBgm.signaled = true;
+    if( dist < s_enemyBgm.tickDist ) s_enemyBgm.tickDist = dist; /* nearest wins */
+}
+
+void liboot_enemy_bgm_tick( void )
+{
+    bool  enemyNear = s_enemyBgm.signaled;
+    float dist      = enemyNear ? s_enemyBgm.tickDist : ENEMY_BGM_RANGE;
+
+    /* Reset the per-tick heartbeat before the next Player update. */
+    s_enemyBgm.signaled = false;
+    s_enemyBgm.tickDist = ENEMY_BGM_RANGE;
+    s_enemyBgm.lastDist = dist;
+
+    if( !s_enemyBgm.enabled ) {
+        if( s_enemyBgm.active ) {                 /* disabled mid-battle: fade out */
+            oot_audio_sequence_stop( s_enemyBgm.player, s_enemyBgm.fadeMs );
+            s_enemyBgm.active = false;
+        }
+        return;
+    }
+
+    if( enemyNear && !s_enemyBgm.active ) {
+        s_enemyBgm.active =
+            oot_audio_sequence_play( s_enemyBgm.player, s_enemyBgm.seqId, s_enemyBgm.fadeMs );
+    } else if( !enemyNear && s_enemyBgm.active ) {
+        oot_audio_sequence_stop( s_enemyBgm.player, s_enemyBgm.fadeMs );
+        s_enemyBgm.active = false;
+    }
+
+    if( s_enemyBgm.active ) {
+        /* Louder as the enemy closes in: full at contact, ~0.35 at max range. */
+        float t = dist / ENEMY_BGM_RANGE;
+        if( t < 0.0f ) t = 0.0f; else if( t > 1.0f ) t = 1.0f;
+        oot_audio_sequence_set_volume( s_enemyBgm.player, 1.0f - 0.65f * t );
+    }
+}
+
+bool oot_audio_set_enemy_bgm( bool enabled, uint8_t player, uint16_t seqId, uint16_t fadeMs )
+{
+    if( player == 0xFFu ) player = OOT_AUDIO_PLAYER_SUB;   /* 0xFF keeps the default player */
+    if( player >= SEQ_PLAYERS ) return false;
+    if( seqId != 0u && seqId >= OOT_AUDIO_SEQUENCE_COUNT ) return false;
+
+    s_enemyBgm.player = player;
+    s_enemyBgm.seqId  = ( seqId != 0u ) ? seqId : LIBOOT_BGM_ENEMY; /* 0 keeps NA_BGM_ENEMY */
+    s_enemyBgm.fadeMs = fadeMs;
+    s_enemyBgm.enabled = enabled;
+    return true;
+}
+
+bool oot_audio_get_enemy_bgm( bool *outActive, float *outDistance )
+{
+    if( outActive )   *outActive = s_enemyBgm.active;
+    if( outDistance ) *outDistance = s_enemyBgm.lastDist;
+    return s_enemyBgm.enabled;
+}

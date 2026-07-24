@@ -2,6 +2,7 @@ oot_actor_query
 oot_actor_set_render
 oot_actor_spawn
 oot_audio_channel_set_io
+oot_audio_get_enemy_bgm
 oot_audio_nature_play
 oot_audio_render_f32
 oot_audio_sequence_count
@@ -14,6 +15,7 @@ oot_audio_sequence_prewarm
 oot_audio_sequence_set_io
 oot_audio_sequence_set_volume
 oot_audio_sequence_stop
+oot_audio_set_enemy_bgm
 oot_audio_set_master_volume
 oot_audio_sfx_catalog_count
 oot_audio_sfx_catalog_get
@@ -55,6 +57,7 @@ oot_engine_scene_load
 oot_engine_scene_query_surface
 oot_engine_scene_set_room
 oot_engine_set_callbacks
+oot_engine_set_enemy_bgm
 oot_engine_set_render_flags
 oot_engine_static_world_load
 oot_engine_step

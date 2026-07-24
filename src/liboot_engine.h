@@ -448,6 +448,15 @@ extern OOT_LIB_FN OoTResult oot_engine_ocarina_note_get(OoTEngine *engine,
                                                         uint8_t noteIndex,
                                                         OoTEnginePcm *outPcm);
 
+/* liboot vNEXT: opt-in proximity-driven enemy/battle BGM. When enabled, liboot
+   plays the OoT battle sequence on OOT_AUDIO_PLAYER_SUB while the vendored
+   Player/actor code reports a hostile enemy within its 500-unit battle range,
+   scaling volume with proximity and fading out when none remain. Disabled by
+   default; layers over any scene BGM the host drives on another player. For the
+   player/sequence/fade overrides and the live state, use the raw
+   oot_audio_set_enemy_bgm / oot_audio_get_enemy_bgm. */
+extern OOT_LIB_FN OoTResult oot_engine_set_enemy_bgm(OoTEngine *engine, uint8_t enabled);
+
 #ifdef __cplusplus
 }
 #endif

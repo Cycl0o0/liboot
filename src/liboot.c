@@ -4,6 +4,7 @@
 
 #include "liboot.h"
 #include "rom_util.h"
+#include "audio_extract.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -745,6 +746,12 @@ void oot_link_tick( int32_t linkId,
        still report state and rebuild geometry below so a paused Link renders. */
     if( !s_linkFrozen )
         liboot_link_update( play, player );
+
+    /* liboot vNEXT: proximity-driven battle BGM. The Player update above calls
+       Audio_SetBgmEnemyVolume() when a hostile enemy is in battle range; drive
+       the opt-in enemy-BGM overlay from that once-per-tick signal. A frozen
+       Link skips the update, so no signal arrives and any battle theme fades. */
+    liboot_enemy_bgm_tick();
 
     if( outState ) {
         outState->position[0] = player->actor.world.pos.x;

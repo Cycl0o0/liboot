@@ -391,6 +391,29 @@ extern OOT_LIB_FN bool oot_audio_sfx_play( uint16_t sfxId, float pan, float volu
 extern OOT_LIB_FN void oot_audio_sfx_stop( uint16_t sfxId );
 extern OOT_LIB_FN void oot_audio_sfx_stop_all( void );
 
+/* liboot vNEXT: proximity-driven enemy/battle BGM. OoT's own Player/actor code
+   decides when a hostile enemy is near (its nearest hostile actor within a
+   500-unit battle range). When this feature is enabled, liboot plays the OoT
+   battle sequence on a dedicated SEQ player while such an enemy is in range,
+   scales its volume with proximity (loudest at contact), and fades it out when
+   none remain. It is DISABLED by default and layers over, rather than replaces,
+   any scene BGM the host is playing on another player.
+
+   `player` selects the SEQ player (0xFF keeps the default, OOT_AUDIO_PLAYER_SUB).
+   `seqId` is the battle sequence (0 keeps the default, NA_BGM_ENEMY / 0x1C).
+   `fadeMs` is the fade in/out. Returns false for an invalid player or seqId.
+   Because the driver runs inside oot_link_tick and calls the sequence player,
+   the host's usual AudioSeq serialization (tick vs oot_audio_render_f32) applies. */
+extern OOT_LIB_FN bool oot_audio_set_enemy_bgm( bool enabled, uint8_t player,
+                                                uint16_t seqId, uint16_t fadeMs );
+
+/* liboot vNEXT: read the live enemy-BGM state. `outActive` receives whether the
+   battle sequence is currently playing; `outDistance` receives the distance
+   (world units) to the nearest battle-range enemy on the most recent tick, or
+   the 500-unit range when none. Any out pointer may be NULL. Returns whether
+   the feature is enabled. */
+extern OOT_LIB_FN bool oot_audio_get_enemy_bgm( bool *outActive, float *outDistance );
+
 /* liboot vNEXT: the twelve ocarina songs, in the game's own OcarinaSongId
    order. Each song is a sequence of note indices 0..4 (the same A/C-down/
    C-right/C-left/C-up indices oot_get_ocarina_note uses). The first six are

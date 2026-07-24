@@ -382,6 +382,42 @@ if (ambienceId >= 0) oot_audio_nature_play(OOT_AUDIO_PLAYER_MAIN, (uint8_t)ambie
 `oot_audio_sfx_catalog_get` enumerates the seven named banks with their
 symbolic `NA_SE_*` names for building a sound browser.
 
+## Battle music when an enemy is near
+
+OoT itself decides when an enemy is near: the vendored Player/actor code tracks
+the nearest hostile actor within a 500-unit battle range and, each tick one is
+in range, calls its enemy-BGM hook. liboot forwards that signal to an opt-in
+driver that plays the OoT battle theme (`NA_BGM_ENEMY`) on a dedicated SEQ
+player, scales its volume with proximity, and fades it out when no enemy
+remains. It is disabled by default and layers over any scene BGM you drive on
+another player.
+
+```c
+#include "liboot.h"
+
+/* Enable with defaults: OOT_AUDIO_PLAYER_SUB, NA_BGM_ENEMY (0x1C), 400 ms fade.
+   0xFF keeps the default player; 0 keeps the default sequence. */
+oot_audio_set_enemy_bgm(true, 0xFF, 0, 400);
+
+/* ... run oot_link_tick / oot_engine_step as usual; the driver runs per tick.
+   The Attention system sees hostile actors, including host Z-targets. */
+
+/* Optional: read the live state to duck your own scene BGM, draw a UI, etc. */
+bool active = false;
+float distance = 0.0f;
+bool enabled = oot_audio_get_enemy_bgm(&active, &distance);
+/* active = battle theme playing; distance = units to the nearest in-range
+   enemy this tick (or 500 when none). */
+
+oot_audio_set_enemy_bgm(false, 0xFF, 0, 400);   /* fades out any active theme */
+```
+
+From the engine API, `oot_engine_set_enemy_bgm(engine, 1)` enables it with those
+defaults; use the raw calls above for the player/sequence/fade overrides and the
+live state. Because the driver runs inside the tick and touches the sequence
+player, keep your usual AudioSeq serialization (tick vs `oot_audio_render_f32`)
+in place.
+
 ## The Ocarina
 
 ```c

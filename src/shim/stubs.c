@@ -10,6 +10,7 @@
 #endif
 
 #include "fake_play.h"
+#include "audio_extract.h"
 
 #include "actor.h"
 #include "audio.h"
@@ -99,7 +100,10 @@ void Audio_PlaySfxGeneral(u16 sfxId, Vec3f* pos, u8 token, f32* freqScale, f32* 
                      vol ? *vol : 1.0f, reverbAdd ? *reverbAdd : 0);
 }
 void Audio_SetBaseFilter(u8 filter) { (void)filter; }
-void Audio_SetBgmEnemyVolume(f32 dist) { (void)dist; }
+/* liboot vNEXT: the real Player code calls this each tick a hostile enemy is
+   within OoT's 500-unit battle range. Forward the distance to the opt-in
+   proximity-driven battle-BGM driver (liboot_enemy_bgm_tick decides playback). */
+void Audio_SetBgmEnemyVolume(f32 dist) { liboot_enemy_bgm_signal(dist); }
 void Audio_SetBgmVolumeOffDuringFanfare(void) {}
 void Audio_SetBgmVolumeOnDuringFanfare(void) {}
 void Audio_SetCodeReverb(s8 reverb) { (void)reverb; }

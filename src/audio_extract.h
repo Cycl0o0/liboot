@@ -50,6 +50,14 @@ typedef struct {
 void liboot_audio_init( const uint8_t *rom, size_t romSize );
 void liboot_audio_terminate( void );
 
+/* liboot vNEXT: proximity-driven enemy/battle BGM. The vendored Player code
+   calls Audio_SetBgmEnemyVolume() every tick a hostile enemy is within OoT's
+   500-unit battle range of Link; the shim forwards that distance through
+   liboot_enemy_bgm_signal(). liboot_enemy_bgm_tick() runs once per
+   oot_link_tick to start, stop, and volume-scale the battle sequence. */
+void liboot_enemy_bgm_signal( float dist );
+void liboot_enemy_bgm_tick( void );
+
 uint16_t liboot_audio_sequence_count( void );
 uint16_t liboot_audio_soundfont_count( void );
 uint16_t liboot_audio_samplebank_count( void );

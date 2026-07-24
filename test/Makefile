@@ -11,7 +11,7 @@ OPENGL_LIBS      := -lGL
 LIBRARY_PATH_ENV := LD_LIBRARY_PATH=../dist
 endif
 
-all: headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test audio_overflow_test fidelity_runner audio_catalog_test audio_sequence_test
+all: headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test audio_overflow_test enemy_bgm_test fidelity_runner audio_catalog_test audio_sequence_test
 
 headless: headless.c $(LIBOOT_LIBRARY)
 	cc -g -rdynamic -I../dist/include headless.c -o headless -L../dist -loot -lm $(RPATH_FLAG)
@@ -47,6 +47,11 @@ rom_util_test: rom_util_test.c ../src/rom_util.c ../src/rom_util.h
 audio_overflow_test: audio_overflow_test.c ../src/audio_math.h
 	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror \
 		audio_overflow_test.c -o audio_overflow_test
+
+enemy_bgm_test: enemy_bgm_test.c $(LIBOOT_LIBRARY)
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+		enemy_bgm_test.c -o enemy_bgm_test -L../dist -loot \
+		$(RPATH_FLAG)
 
 # ROM-backed audio tests take a ROM path at runtime; no copyrighted data is
 # embedded in either binary.
