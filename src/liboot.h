@@ -400,7 +400,7 @@ extern OOT_LIB_FN void oot_audio_sfx_stop_all( void );
    any scene BGM the host is playing on another player.
 
    `player` selects the SEQ player (0xFF keeps the default, OOT_AUDIO_PLAYER_SUB).
-   `seqId` is the battle sequence (0 keeps the default, NA_BGM_ENEMY / 0x1C).
+   `seqId` is the battle sequence (0 keeps the default, NA_BGM_ENEMY / 0x1A).
    `fadeMs` is the fade in/out. Returns false for an invalid player or seqId.
    Because the driver runs inside oot_link_tick and calls the sequence player,
    the host's usual AudioSeq serialization (tick vs oot_audio_render_f32) applies. */

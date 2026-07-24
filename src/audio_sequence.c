@@ -2149,7 +2149,7 @@ void liboot_audio_sequence_reset( void )
 /* sequence on a dedicated player while an enemy is in range, scales its      */
 /* volume with proximity, and fades it out when none remain. Opt-in.          */
 
-#define LIBOOT_BGM_ENEMY    0x1Cu   /* NA_BGM_ENEMY (sequence_table.h Sequence_26) */
+#define LIBOOT_BGM_ENEMY    0x1Au   /* NA_BGM_ENEMY (0x1A). NB: 0x1C is INSIDE_DEKU_TREE. */
 #define ENEMY_BGM_RANGE     500.0f  /* sqrt of OoT's SQ(500) battle range */
 
 static struct {

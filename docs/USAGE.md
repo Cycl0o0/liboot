@@ -395,7 +395,7 @@ another player.
 ```c
 #include "liboot.h"
 
-/* Enable with defaults: OOT_AUDIO_PLAYER_SUB, NA_BGM_ENEMY (0x1C), 400 ms fade.
+/* Enable with defaults: OOT_AUDIO_PLAYER_SUB, NA_BGM_ENEMY (0x1A), 400 ms fade.
    0xFF keeps the default player; 0 keeps the default sequence. */
 oot_audio_set_enemy_bgm(true, 0xFF, 0, 400);
 

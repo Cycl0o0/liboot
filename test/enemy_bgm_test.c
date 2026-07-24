@@ -44,7 +44,7 @@ int main(void)
     check("reject bad seqId", oot_audio_set_enemy_bgm(true, 0, 60000, 400) == false);
 
     /* Explicit valid config: SFX player carrying NA_BGM_ENEMY. */
-    check("explicit config ok", oot_audio_set_enemy_bgm(true, 2, 0x1C, 500) == true);
+    check("explicit config ok", oot_audio_set_enemy_bgm(true, 2, 0x1A, 500) == true);
 
     /* NULL out pointers must be tolerated. */
     (void)oot_audio_get_enemy_bgm(NULL, NULL);

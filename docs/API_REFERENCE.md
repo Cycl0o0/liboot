@@ -767,7 +767,7 @@ void        oot_audio_sfx_stop_all(void);
 
 /* Opt-in proximity battle BGM (disabled by default). Plays NA_BGM_ENEMY while a
    hostile enemy is within OoT's 500-unit battle range of Link. player 0xFF keeps
-   the default (OOT_AUDIO_PLAYER_SUB); seqId 0 keeps NA_BGM_ENEMY (0x1C). */
+   the default (OOT_AUDIO_PLAYER_SUB); seqId 0 keeps NA_BGM_ENEMY (0x1A). */
 bool        oot_audio_set_enemy_bgm(bool enabled, uint8_t player, uint16_t seqId, uint16_t fadeMs);
 bool        oot_audio_get_enemy_bgm(bool *outActive, float *outDistance); /* returns enabled */
 ```
