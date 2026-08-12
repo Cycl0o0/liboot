@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Cycl0o0
 
-# Relocatable from <prefix>/<libdir>/pkgconfig, including when `cmake
-# --install --prefix` overrides the configure-time prefix.
-prefix=${pcfiledir}/../..
+# Relocatable from <prefix>/<libdir>/pkgconfig, including multi-component
+# libdirs and a `cmake --install --prefix` override.
+prefix=${pcfiledir}/@LIBOOT_PC_PREFIX_RELATIVE@
 exec_prefix=${prefix}
-libdir=${exec_prefix}/@CMAKE_INSTALL_LIBDIR@
-includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@/liboot
+libdir=${pcfiledir}/..
+includedir=@LIBOOT_PC_INCLUDEDIR@
 
 Name: liboot
 Description: @PROJECT_DESCRIPTION@

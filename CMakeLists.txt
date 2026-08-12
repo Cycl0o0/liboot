@@ -378,6 +378,21 @@ install(
     DESTINATION "${liboot_cmake_install_dir}"
 )
 
+# Derive the path back to the install prefix from the pkg-config directory.
+# A fixed ../.. only works when CMAKE_INSTALL_LIBDIR is one component (lib or
+# lib64), not for common multiarch layouts such as lib/x86_64-linux-gnu.
+file(RELATIVE_PATH LIBOOT_PC_PREFIX_RELATIVE
+    "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig"
+    "${CMAKE_INSTALL_PREFIX}"
+)
+if(IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+    set(LIBOOT_PC_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}/liboot")
+else()
+    set(LIBOOT_PC_INCLUDEDIR
+        "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}/liboot"
+    )
+endif()
+
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/liboot.pc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/liboot.pc"

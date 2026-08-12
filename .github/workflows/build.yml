@@ -173,6 +173,23 @@ jobs:
         shell: bash
         run: tools/check-install.sh "$INSTALL_PREFIX"
 
+      - name: Verify multiarch and custom install directories
+        if: matrix.os == 'ubuntu-latest' && matrix.kind == 'static'
+        shell: bash
+        run: |
+          portable_prefix="$RUNNER_TEMP/liboot-portable-install"
+          cmake -S . -B build-portable -G "Ninja Multi-Config" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_INSTALL_LIBDIR=lib/x86_64-linux-gnu \
+            -DCMAKE_INSTALL_INCLUDEDIR=headers \
+            -DCMAKE_INSTALL_DATAROOTDIR=resources \
+            -DCMAKE_INSTALL_PREFIX="$portable_prefix"
+          cmake --build build-portable --config Release --parallel
+          cmake --install build-portable --config Release
+          CMAKE_GENERATOR="Ninja Multi-Config" \
+            tools/check-install.sh "$portable_prefix"
+
       - name: Verify exported ABI (shared)
         if: matrix.kind == 'shared'
         shell: bash

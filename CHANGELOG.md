@@ -11,7 +11,8 @@ patch release must remain ABI-compatible with its minor line.
 - A single ROM-free validation entry point for local and release builds.
 - Reproducibility checks for the pinned `src/decomp` snapshot.
 - Parser fuzzing entry points and binding/header parity checks.
-- A published ROM-compatibility matrix and maintainer release checklist.
+- A published ROM-compatibility matrix with an exact PAL 1.1 identity profile.
+- A maintainer release checklist.
 - A local, byte-order-independent ROM identity and profile-matching tool.
 - Signed GitHub build-provenance attestations for release archives.
 - Installed-package smoke tests through both `pkg-config` and CMake consumers.
@@ -24,6 +25,12 @@ patch release must remain ABI-compatible with its minor line.
 
 - Public documentation now describes liboot as a host-driven Link runtime and
   separates current capabilities from host responsibilities and limitations.
+
+### Fixed
+
+- Relocatable `pkg-config` metadata and installed-package checks now support
+  multi-component library directories, custom include and documentation roots,
+  install-prefix overrides, and multi-config CMake generators.
 
 ## 0.8.0
 

@@ -12,7 +12,6 @@ if [ "$#" -ne 1 ]; then
 fi
 
 prefix=$(cd "$1" && pwd)
-doc="$prefix/share/doc/liboot"
 python=${PYTHON3:-python3}
 
 find_installed_file() {
@@ -41,10 +40,20 @@ cmake_config=$(find_installed_file \
   '*/cmake/liboot/libootConfig.cmake' libootConfig.cmake)
 pc_dir=${pc_file%/*}
 cmake_dir=${cmake_config%/*}
+# Isolate discovery to the staged package. A machine-wide liboot.pc must not
+# make a broken or incomplete install pass this check.
+export PKG_CONFIG_PATH="$pc_dir"
+export PKG_CONFIG_LIBDIR="$pc_dir"
+pkg-config --validate liboot
+includedir=$(pkg-config --variable=includedir liboot)
+libdir=$(pkg-config --variable=libdir liboot)
+doc_readme=$(find_installed_file '*/doc/liboot/README.md' 'documentation README.md')
+doc=${doc_readme%/*}
 
 required_files=(
-  "$prefix/include/liboot/liboot.h"
-  "$prefix/include/liboot/liboot_engine.h"
+  "$includedir/liboot.h"
+  "$includedir/liboot_engine.h"
+  "$includedir/liboot.hpp"
   "$pc_file"
   "$cmake_config"
   "$doc/LICENSE"
@@ -97,10 +106,6 @@ printf '%s\n' \
   'int main(void) {' \
   '    return oot_engine_api_version() == OOT_ENGINE_API_VERSION ? 0 : 1;' \
   '}' > "$work/main.c"
-
-export PKG_CONFIG_PATH="$pc_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-pkg-config --validate liboot
-libdir=$(pkg-config --variable=libdir liboot)
 
 if ! command -v "$python" >/dev/null 2>&1; then
   echo "check-install: Python 3 is required to preserve pkg-config arguments" >&2
@@ -182,6 +187,8 @@ printf '%s\n' \
   'find_package(liboot CONFIG REQUIRED)' \
   'add_executable(liboot-cmake-smoke main.c)' \
   'target_link_libraries(liboot-cmake-smoke PRIVATE liboot::oot)' \
+  'enable_testing()' \
+  'add_test(NAME liboot-cmake-smoke COMMAND liboot-cmake-smoke)' \
   > "$work/CMakeLists.txt"
 
 cmake -S "$work" -B "$work/cmake-build" \
@@ -190,6 +197,9 @@ cmake -S "$work" -B "$work/cmake-build" \
   -Dliboot_DIR="$cmake_dir" \
   -DCMAKE_BUILD_RPATH="$libdir"
 cmake --build "$work/cmake-build" --config Release --parallel
-"$work/cmake-build/liboot-cmake-smoke"
+(
+  cd "$work/cmake-build"
+  ctest -C Release --output-on-failure
+)
 
 echo "check-install: OK — metadata, pkg-config, and CMake consumers"
