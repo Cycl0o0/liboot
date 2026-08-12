@@ -4,69 +4,46 @@
 [![License: AGPL v3 or later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange.svg)](#limitations)
 
-liboot runs Link's real *Ocarina of Time* gameplay code as a standalone shared
-library. It takes the actual Player actor (`z_player.c`), collision engine
-(`z_bgcheck.c`), and skeleton/animation system (`z_skelanime.c`) from the
-[zeldaret/oot](https://github.com/zeldaret/oot) decompilation, wraps them in a
-thin shim that fakes the N64 OS, and exposes a C API you can embed in another
-engine. This is the same approach [libsm64](https://github.com/libsm64/libsm64)
-used to extract Mario from the SM64 decompilation.
+liboot embeds Link's *Ocarina of Time* gameplay in another engine. It compiles
+selected Player, collision, animation, actor, and math code from the
+[zeldaret/oot](https://github.com/zeldaret/oot) decompilation into a C11 library,
+then adapts its rendering and audio requests for a host application.
 
-Models, textures, animations, and audio are read at runtime from a ROM you
-supply. **No game asset, and no ROM, ships in this repository.**
+The host supplies a ROM, controls, collision or a ROM scene, and the rendering
+and audio backends. liboot advances the simulation in fixed ticks (20 Hz by
+default) and returns Link's state, triangle and texture data, actor snapshots,
+and audio output.
 
-## What it is, and what it is not
+No ROM or extracted game asset is included. liboot is not an emulator, PC port,
+complete game, or renderer.
 
-liboot is a compatibility SDK for embedding original OoT Player gameplay in a
-host engine. It is:
+## Try it
 
-- the genuine Player state machine, collision, animation, and audio, compiled
-  for a normal desktop toolchain;
-- a renderer-neutral source of geometry, textures, skeleton poses, and PCM;
-- a C ABI meant to sit under Unity, Godot, Unreal, or a custom engine.
-
-It is **not** a PC port, an emulator, a complete game, or a source of assets.
-It does not draw anything itself and it does not include a ROM.
-
-## How it works
-
-The decompilation targets the N64. To run 22 of its translation units on a PC,
-liboot closes three gaps:
-
-1. **Missing OS.** A shim (`src/shim/`) supplies fake `PlayState`, camera, and
-   save-context instances plus no-op subsystems (audio thread, messages,
-   effects). The rule is *real types, fake instances; real math, fake IO*.
-2. **Missing assets.** Animation headers are generated from the decomp's asset
-   XMLs as segment-7 tokens; model symbols become one-command display lists
-   plus a bind manifest the loader fills from the ROM at runtime (`src/gen/`).
-3. **Missing symbols.** Around 180 engine functions are stubbed or minimally
-   implemented — synchronous message queues, a DMA service that resolves
-   segment tokens and byte-swaps animation frames, and a follow camera driven
-   from the public API.
-
-A patched `SEGMENTED_TO_VIRTUAL` distinguishes 32-bit ROM segment tokens from
-native pointers, so the same decomp code walks both ROM data and host structs.
-
-## Requirements
-
-- A C11 compiler (GCC or Clang) and GNU Make, or CMake 3.16+.
-- Linux, macOS, or another POSIX host. CI builds Linux (x86-64 and ARM64) and
-  macOS, each as a shared and a static library.
-- A legally obtained, compatible OoT ROM (`.z64`, `.v64`, or `.n64`), supplied
-  at runtime. PAL Europe Rev 1 is the currently exercised revision.
-- SDL2 and OpenGL headers only for the optional playground. The library itself
-  depends on neither.
-
-## Build
+You need a C11 compiler, GNU Make or CMake 3.16+, and a legally obtained
+compatible ROM (`.z64`, `.v64`, or `.n64`). Linux and macOS are tested in CI;
+the optional playground also needs SDL2 and OpenGL.
 
 ```sh
-make                 # -> dist/liboot.{so,dylib} and public headers in dist/include/
-make -C examples     # -> examples/engine and examples/basic
+make
+make -C examples
 ./examples/engine /path/to/oot.z64
 ```
 
-Or with CMake, which also installs `liboot::oot` package metadata and a
-`pkg-config` file:
+The example loads a flat collision floor, creates Link, runs 20 simulation
+ticks, and prints the resulting position and geometry count. Its source is in
+[`examples/engine.c`](examples/engine.c).
+
+For an interactive renderer and diagnostics UI:
+
+```sh
+make -C test playground
+./test/playground /path/to/oot.z64
+```
+
+The playground can also run headlessly. `--frames`, `--scene-frames`, `--suite`,
+and `--features` select its scripted checks.
+
+The CMake build installs a `liboot::oot` package target and a `liboot.pc` file:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -74,202 +51,140 @@ cmake --build build
 cmake --install build --prefix ./stage
 ```
 
-Pass `-DBUILD_SHARED_LIBS=OFF` for a static library. See
-[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for the sanitizer build and
-full options.
+Set `-DBUILD_SHARED_LIBS=OFF` for a static library.
 
-## Quick start
+## Host and library responsibilities
 
-The recommended entry point is the versioned engine API in
-[`liboot_engine.h`](src/liboot_engine.h). A minimal host:
+| The host owns | liboot supplies |
+| --- | --- |
+| ROM selection and storage | ROM validation, byte-order handling, DMADATA lookup, Yaz0 decompression, and runtime asset binding |
+| Input and camera direction | One Player update per fixed tick (20 Hz by default), including movement, equipment, items, health, magic, and targeting |
+| Static collision or scene selection | OoT floor, wall, ceiling, water, and raycast handling; room state, door metadata, and host-requested room swaps |
+| GPU resources and draw submission | Renderer-independent triangles, UVs, shade color/alpha, texture views, and render flags |
+| Audio device and scheduling | SFX events, decoded voice and instrument samples, and interleaved stereo F32 sequence mixing |
+| Game-specific enemies and rules | Link, Navi, selected projectile actors, and snapshots of supported actors |
 
-```c
-#include "liboot_engine.h"
+Borrowed frame and texture pointers are short-lived. Upload or copy their data
+before the next mutating call. Serialize engine/gameplay calls on one thread,
+and do not re-enter the library from callbacks. The raw AudioSeq control and
+render calls may use an audio thread when the host locks their shared state.
 
-/* A flat floor made of two triangles. */
-static const struct OoTSurface floor[] = {
-    { 0, {{ -1000, 0, -1000 }, { -1000, 0, 1000 }, { 1000, 0, 1000 }} },
-    { 0, {{ -1000, 0, -1000 }, {  1000, 0, 1000 }, { 1000, 0, -1000 }} },
-};
+## Current capabilities
 
-if (oot_engine_api_version() != OOT_ENGINE_API_VERSION)
-    fail("liboot API version mismatch");
+| Area | Available now |
+| --- | --- |
+| Player | Adult and child movement, fidget states, equipment, usable items, damage, health, magic, swimming, diving, iron boots, and the underwater timer |
+| Items and actors | Swords, shields, tunics, boots, Ocarina input, arrows, bombs, hookshot, boomerang, Navi, and host-owned Z-targets |
+| World | Host triangle collision and water boxes; ROM scene collision, geometry, spawn points, rooms, doors, music, ambience, lighting, and fog metadata |
+| Rendering | Link, Navi, projectile, and room geometry; RGBA texture decoding; per-vertex alpha and per-triangle cull, alpha-test, and decal flags |
+| Audio | Engine API: parameterized SFX callbacks and voice/Ocarina PCM views. Raw API: 110 ROM sequences, four sequence players, 38 soundfonts, seven sample banks, 19 nature presets, and a 1,259-entry SFX catalog. |
+| Integration | C ABI, C++11 RAII wrapper, C# P/Invoke binding, CMake package metadata, and `pkg-config` metadata |
 
-OoTEngineConfig config;
-oot_engine_config_init(&config);   /* check the result in real code */
-config.romData = rom;              /* your ROM bytes */
-config.romSize = romSize;
+The public headers define the exact contracts and limits. See the
+[API reference](docs/API_REFERENCE.md) for the exported surface.
 
-OoTEngine *engine = NULL;
-oot_engine_create(&config, &engine);
-free(rom);                         /* create() copied the ROM synchronously */
+## Choose an API
 
-oot_engine_static_world_load(engine, floor, 2, NULL, 0);  /* before Link */
-oot_engine_link_create(engine, 0.0f, 0.0f, 0.0f);
-oot_engine_link_set_equipment(engine, OOT_SWORD_MASTER, OOT_SHIELD_HYLIAN,
-                              OOT_TUNIC_KOKIRI, OOT_BOOTS_KOKIRI);
+| API | Use it for |
+| --- | --- |
+| [`liboot_engine.h`](src/liboot_engine.h) | New integrations. It provides an opaque owner, result codes, size-tagged inputs, engine-owned frame buffers, and fixed or accumulated stepping. |
+| [`liboot.h`](src/liboot.h) | Existing integrations or features not yet exposed by the engine API, including direct AudioSeq control, the SFX catalog, Ocarina tables, the direct skeleton-pose getter, and actor spawning. |
 
-OoTEngineInput input;
-oot_engine_input_init(&input);
-const OoTEngineFrame *frame = NULL;
-
-for (int tick = 0; tick < 20; ++tick) {
-    input.stickY = tick < 12 ? 1.0f : 0.0f;   /* walk forward, then stop */
-    oot_engine_step(engine, &input, &frame);  /* one 20 Hz tick */
-}
-
-printf("Link at %.1f %.1f %.1f, %u triangles\n",
-       frame->link.position[0], frame->link.position[1],
-       frame->link.position[2], frame->geometry.numTriangles);
-
-oot_engine_destroy(engine);
-```
-
-Load a world or a ROM scene **before** creating Link: `Player_Init` probes
-collision immediately, and the wrapper rejects the unsafe ordering. The full
-runnable version is [examples/engine.c](examples/engine.c);
-[examples/basic.c](examples/basic.c) shows the low-level API.
-
-For a task-by-task cookbook — rendering, textures, scenes, audio, actors,
-targets, the Ocarina, and the C++/C# bindings — see
-[docs/USAGE.md](docs/USAGE.md).
-
-## What works today
-
-**Initialization.** `oot_global_init` accepts `.z64/.v64/.n64`, finds
-`link_animetion`, `object_link_boy`, and `object_link_child` through the ROM's
-own DMADATA (not fixed indices), Yaz0-decompresses, relocates both flex
-skeletons, and binds assets.
-
-**Movement and state.** The real Player state machine: idle with fidget
-animations, camera-relative running at authentic caps (adult 6.0, child 5.5
-u/f) and accel/decel curves, runtime adult/child switching, save-context-backed
-health and magic, damage through `Player_InflictDamage`, and the underwater
-drown timer.
-
-**Equipment and items.** Swords, shields, tunics, boots, the Ocarina, and the
-real projectile actors — arrows, bombs, hookshot, and boomerang.
-
-**Collision and scenes.** Host triangles and water boxes build a real
-`CollisionHeader`; `z_bgcheck` handles floors, walls, ceilings, raycasts,
-swimming, diving, and iron boots. ROM scenes load real collision and geometry,
-support multi-room dungeon rendering and door-driven room transitions, and
-report per-scene music and ambience.
-
-**Rendering.** An F3DZEX2 display-list interpreter walks the flex skeleton with
-the game's own limb-draw overrides, so the model follows equipment and age. The
-texture pipeline (SETTIMG/SETTILE/LOADBLOCK/LOADTLUT; rgba16, ci4/ci8, ia, i
-formats) decodes every referenced texture into an RGBA cache. Output is a
-renderer-neutral triangle stream with per-vertex shade alpha and per-triangle
-cull/alpha-test/decal flags.
-
-**Audio.** Every SFX request the Player code makes is forwarded through a
-callback with pitch, volume, reverb, and position. A native mixer renders the
-ROM's 110 sequences through the four retail players, 38 soundfonts, and seven
-sample banks to interleaved stereo F32 at the host rate, allocation-free, with
-fades, all 19 nature-ambience presets, and a 1,259-entry SFX selector. An
-opt-in proximity driver plays the OoT battle theme while a hostile enemy is
-near Link, using the game's own enemy-proximity trigger.
-
-**Targeting.** Host-owned Z-targets backed by OoT's real Attention system, with
-lock, strafing, auto-facing, and release. The real EnElf actor supplies Navi.
-
-**Ocarina.** Canonical note patterns for all twelve songs, longest-tail match
-recognition of a played sequence, and the five ROM instrument samples.
-
-For exact contracts, read the public headers and
-[docs/API_REFERENCE.md](docs/API_REFERENCE.md).
+Only one API may own the process lifecycle at a time. Do not mix raw lifecycle
+calls with an active `OoTEngine`.
 
 ## Documentation
 
-| Document | Contents |
+| If you need to... | Read |
 | --- | --- |
-| [Getting started](docs/GETTING_STARTED.md) | Build, minimal host, fixed step, rendering, collision, audio. |
-| [Usage cookbook](docs/USAGE.md) | Task-by-task examples for every subsystem, plus C++ and C#. |
-| [API reference](docs/API_REFERENCE.md) | Every exported function, struct, enum, and constant. |
-| [Universal SDK](docs/UNIVERSAL_SDK.md) | The engine-neutral wrapper, ABI rules, instance model, roadmap. |
-| [Engine integration](docs/ENGINE_INTEGRATION.md) | Unity, Godot, Unreal, C/C++, C#, Rust, Python patterns. |
-| [Fidelity traces](docs/FIDELITY.md) | The record/compare runner and what a trace does and does not prove. |
-| [Bindings](bindings/README.md) | C++ RAII and C#/Unity P/Invoke starters. |
-| [Notices](NOTICE.md) | AGPL scope, vendored-source status, ROM policy, attribution. |
+| Build the library and run a first host | [Getting started](docs/GETTING_STARTED.md) |
+| Copy a focused example for one subsystem | [Usage cookbook](docs/USAGE.md) |
+| Look up a function, struct, enum, or limit | [API reference](docs/API_REFERENCE.md) |
+| Integrate with C/C++, C#, Unity, Godot, Unreal, Rust, or Python | [Engine integration](docs/ENGINE_INTEGRATION.md) |
+| Understand ABI and ownership decisions | [Engine API design](docs/UNIVERSAL_SDK.md) |
+| Record or compare deterministic runs | [Fidelity traces](docs/FIDELITY.md) |
+| Use the C++ or C# starters | [Language bindings](bindings/README.md) |
 
-## Two APIs
+The [documentation index](docs/README.md) separates guides from reference
+material.
 
-- [`liboot_engine.h`](src/liboot_engine.h) — the **recommended** API. An opaque
-  `OoTEngine` handle, size-tagged config and input for ABI-stable growth,
-  explicit `OoTResult` codes, engine-owned frame views, and one-tick or
-  accumulated stepping. Start here.
-- [`liboot.h`](src/liboot.h) — the low-level compatibility API. Process-global
-  lifecycle and caller-owned geometry buffers. Use it only for a feature the
-  wrapper has not yet surfaced.
+## How it works
 
-## Playground
+The selected decompilation units still expect N64 services and segmented
+addresses. liboot supplies the minimum host environment needed to run them:
 
-```sh
-make -C test playground     # needs SDL2 + OpenGL
-./test/playground /path/to/oot.z64
-```
+1. `src/shim/` provides the `PlayState`, camera, save context, message queues,
+   DMA behavior, and placeholders for systems outside liboot's scope.
+2. `src/gen/` turns decompilation asset declarations into ROM-backed symbols.
+   The loader resolves and binds those symbols when an engine is created.
+3. `src/gfx_adapter.c` interprets F3DZEX2 display lists into host-readable
+   triangles and textures instead of sending commands to an N64 renderer.
 
-An interactive workbench, not a single demo: live health, magic, inputs,
-loadout, actor and geometry counts, and a diagnostics panel with state flags,
-animation data, and the recent SFX log. Press **F9** or **Tab** for the pages
-(Play, Link, Items, World, Audio, Render); **F5**/**F6** switch between the test
-arena and eight ROM scenes. Headless modes run before SDL/OpenGL init, so they
-work in CI:
+A patched `SEGMENTED_TO_VIRTUAL` distinguishes 32-bit ROM segment tokens from
+native pointers, allowing the selected game code to traverse both ROM data and
+host structures.
 
-```sh
-./test/playground rom.z64 --frames 3000        # scripted arena loop
-./test/playground rom.z64 --scene-frames 1600  # walk every scene
-./test/playground rom.z64 --suite 1000         # full API checks + N stress ticks
-```
+The architecture follows the same broad extraction model as
+[libsm64](https://github.com/libsm64/libsm64), but liboot contains no libsm64
+source.
 
 ## Tests
 
-ROM-free regressions run anywhere and gate CI:
+ROM-free checks run in public CI:
 
 ```sh
 make -C test engine_init_test rom_util_test audio_overflow_test fidelity_runner
-./test/engine_init_test        # ABI/lifecycle
-./test/rom_util_test           # DMADATA/Yaz0/byteswap
-./test/audio_overflow_test     # mixer bounds
+./test/engine_init_test
+./test/rom_util_test
+./test/audio_overflow_test
 ./test/fidelity_runner --self-test
 ```
 
-ROM-backed tests (`headless`, `equip_test`, `audio_catalog_test`,
-`audio_sequence_test`) take a ROM path. The fidelity runner records and replays
-a deterministic numeric/hash trace:
+ROM-backed tests cover initialization, equipment, scenes, rendering, the audio
+catalog and sequencer, and longer headless runs. A fidelity trace can detect a
+regression between liboot builds:
 
 ```sh
-./test/fidelity_runner rom.z64 --record local.trace
-./test/fidelity_runner rom.z64 --compare local.trace
+./test/fidelity_runner oot.z64 --record local.trace
+./test/fidelity_runner oot.z64 --compare local.trace
 ```
 
-A trace is an anti-regression baseline, not proof of a match with retail OoT.
-See [docs/FIDELITY.md](docs/FIDELITY.md).
+A liboot-generated trace is not proof of agreement with retail OoT. The
+[fidelity guide](docs/FIDELITY.md) explains the distinction.
 
 ## Limitations
 
-- One engine and one Link per process. The decomp core still uses globals; the
-  opaque handle is a migration boundary, not multi-instance support yet.
-- No general enemy/actor runtime and no dynamic collision.
-- First-pass scene loader: main headers only, no exits, alternate day/age
-  headers, or animated materials; prerendered JPEG backgrounds are not drawn.
-- Geometry is a triangle stream without entity, material, pass, blend, or depth
-  metadata.
-- Behavior is compiled against the NTSC 1.2 decomp paths even when structurally
-  compatible assets come from another retail ROM. Do not claim untested ROM
-  compatibility.
+- The decompilation core is process-global: one engine and one Link may exist in
+  a process.
+- PAL 1.1 is the currently exercised ROM revision. Gameplay code is compiled
+  from the NTSC 1.2 decompilation paths, so other ROM revisions are not claimed
+  compatible.
+- Static host collision is replaced as one world; dynamic collision objects are
+  not supported.
+- The actor support is limited to Link, Navi, selected projectiles, and
+  host-provided targeting. This is not a general enemy or actor runtime.
+- Scene loading handles main headers and rooms, but not alternate age/day
+  headers, exits, void-out transitions, animated materials, or prerendered JPEG
+  backgrounds.
+- Link and actor geometry uses fixed capacities and has no source-entity or
+  material ranges. Scene geometry exposes one opaque/translucent split, not
+  per-batch material, blend, or depth metadata.
+- The audio mixer is a native approximation, not bit-exact N64 RSP emulation.
+- Windows is not currently a supported build or release target.
 
-The [roadmap](docs/UNIVERSAL_SDK.md#roadmap) tracks multi-instance support, a
-published compatibility matrix, richer draw batches, and packaged engine plugins.
+The [roadmap](docs/UNIVERSAL_SDK.md#roadmap) covers context isolation, ROM
+profiles, richer draw batches, host callbacks, audio fidelity, and packaged
+engine integrations.
 
 ## License and provenance
 
-Original liboot code and documentation, by **Cycl0o0**, are licensed under the
+Code and documentation written for liboot by **Cycl0o0** are licensed under the
 [GNU Affero General Public License v3.0 or later](LICENSE).
 
-The `src/decomp/` subtree is vendored from `zeldaret/oot`, which does not
-currently declare a repository-wide license; liboot does not relicense it. Read
-[NOTICE.md](NOTICE.md) before redistributing. No Nintendo ROM or asset is
-included, and a ROM must never be committed to a project that uses liboot.
-liboot is unaffiliated with Nintendo.
+The selected files under `src/decomp/` are vendored from `zeldaret/oot`, which
+does not currently declare a repository-wide license. liboot does not relicense
+that material. Read [NOTICE.md](NOTICE.md) before redistributing.
+
+No Nintendo ROM or extracted asset is included. Users must supply their own
+legally obtained compatible ROM. liboot is an independent project and is not
+affiliated with or endorsed by Nintendo.

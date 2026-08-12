@@ -40,7 +40,8 @@ LIB_NOTICE_FILE   := $(DIST_DIR)/NOTICE.md
 LIB_README_FILE   := $(DIST_DIR)/README.md
 LIB_DOCS_STAMP    := $(DIST_DIR)/.docs-stamp
 
-DOC_SUPPORT_FILES := docs/GETTING_STARTED.md docs/UNIVERSAL_SDK.md \
+DOC_SUPPORT_FILES := docs/README.md docs/GETTING_STARTED.md docs/USAGE.md \
+                     docs/API_REFERENCE.md docs/UNIVERSAL_SDK.md \
                      docs/ENGINE_INTEGRATION.md docs/FIDELITY.md bindings/README.md \
                      bindings/cpp/liboot.hpp bindings/csharp/LibOot.cs \
                      bindings/csharp/README.md \
@@ -84,7 +85,8 @@ $(LIB_README_FILE): README.md
 $(LIB_DOCS_STAMP): $(DOC_SUPPORT_FILES)
 	mkdir -p $(DIST_DIR)/docs $(DIST_DIR)/src $(DIST_DIR)/bindings/cpp \
 	           $(DIST_DIR)/bindings/csharp $(DIST_DIR)/examples
-	cp docs/GETTING_STARTED.md docs/UNIVERSAL_SDK.md \
+	cp docs/README.md docs/GETTING_STARTED.md docs/USAGE.md \
+	   docs/API_REFERENCE.md docs/UNIVERSAL_SDK.md \
 	   docs/ENGINE_INTEGRATION.md docs/FIDELITY.md $(DIST_DIR)/docs/
 	cp src/liboot.h src/liboot_engine.h $(DIST_DIR)/src/
 	cp bindings/README.md $(DIST_DIR)/bindings/

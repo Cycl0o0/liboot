@@ -1,7 +1,7 @@
 # liboot C# binding
 
-`LibOot.cs` is a dependency-free P/Invoke binding for the stable liboot engine
-API. It targets runtimes that support classic `System.Runtime.InteropServices`,
+`LibOot.cs` is a dependency-free P/Invoke binding for liboot engine API version
+`1`. It targets runtimes that support classic `System.Runtime.InteropServices`,
 including Mono and modern .NET.
 
 ## Build
@@ -15,8 +15,8 @@ mcs -unsafe -warnaserror -target:library -out:LibOot.dll LibOot.cs
 
 Place the native library where the application loader can find it. On Linux
 this is normally `liboot.so` beside the executable or in a directory from the
-dynamic loader search path; use the corresponding `liboot.dll` or
-`liboot.dylib` name on Windows or macOS.
+dynamic loader search path; macOS uses `liboot.dylib`. The project does not
+currently provide a supported Windows DLL.
 
 ## Safe initialization
 

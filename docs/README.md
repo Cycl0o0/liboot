@@ -1,49 +1,40 @@
 # liboot documentation
 
-Start with the [project README](../README.md) for what liboot is, how it works,
-and a quick-start. This directory holds the reference material.
+New to the project? Build and run the minimal host in
+[Getting started](GETTING_STARTED.md). If you already have liboot running, use
+the [usage cookbook](USAGE.md) for focused examples or the
+[API reference](API_REFERENCE.md) for exact signatures and limits.
 
 ## Guides
 
-- **[Getting started](GETTING_STARTED.md)** — requirements, the Make and CMake
-  builds (including the sanitizer build), the minimal host, the fixed
-  simulation step, rendering, collision, scenes, and audio.
-- **[Usage cookbook](USAGE.md)** — task-by-task, copy-pasteable examples for
-  every subsystem: lifecycle, stepping, equipment, geometry, textures,
-  collision, scenes, rooms, targeting, actors, audio, the Ocarina, and the
-  C++/C# bindings.
-- **[Engine integration](ENGINE_INTEGRATION.md)** — Unity, Godot, Unreal,
-  C/C++, C#, Rust, Python, and custom-engine adapter patterns, with coordinate
-  conversion and threading.
-- **[Universal SDK](UNIVERSAL_SDK.md)** — the design of the engine-neutral
-  layer, ABI rules for bindings, the instance model, and the roadmap.
-- **[Fidelity traces](FIDELITY.md)** — the deterministic record/compare runner
-  and what a trace does and does not prove.
+- [Getting started](GETTING_STARTED.md): requirements, Make and CMake builds,
+  the minimal host, timing, rendering, collision, scenes, and audio.
+- [Usage cookbook](USAGE.md): examples organized by task and subsystem.
+- [Engine integration](ENGINE_INTEGRATION.md): ownership, coordinates,
+  threading, deployment, and adapter patterns for common engines and languages.
+- [Engine API design](UNIVERSAL_SDK.md): ABI decisions, instance
+  model, and roadmap.
+- [Fidelity traces](FIDELITY.md): deterministic record/compare runs and the
+  evidence required for a compatibility claim.
 
 ## Reference
 
-- **[API reference](API_REFERENCE.md)** — every exported function, struct,
-  enum, and constant in both public headers.
-- [`src/liboot_engine.h`](../src/liboot_engine.h) — the engine-neutral API
-  (recommended), normative.
-- [`src/liboot.h`](../src/liboot.h) — the low-level compatibility API,
-  normative.
-- [Language bindings](../bindings/README.md) — C++ RAII and C#/Unity P/Invoke
+- [API reference](API_REFERENCE.md): exported functions, structures, enums, and
+  constants from both public headers.
+- [`src/liboot_engine.h`](../src/liboot_engine.h): recommended API for new
+  integrations; this header is the normative contract.
+- [`src/liboot.h`](../src/liboot.h): process-global compatibility API for
+  features not yet available through the engine API.
+- [Language bindings](../bindings/README.md): C++11 RAII and C# P/Invoke
   starters.
 
-## Which API do I use?
+## Which API?
 
-Use the **engine API** (`liboot_engine.h`) for anything new. It gives you an
-opaque handle, explicit error codes, engine-owned frame buffers, and a stable
-ABI. Drop to the **low-level API** (`liboot.h`) only for a feature the engine
-wrapper has not surfaced yet — full music playback and the AudioSeq mixer, the
-SFX catalog, the Ocarina song table, the skeleton pose getter, and direct
-actor spawning currently live there.
+Start with `liboot_engine.h`. Use `liboot.h` only when you need direct AudioSeq
+control, the SFX catalog, Ocarina tables, the direct skeleton-pose getter, actor
+spawning, or an existing raw-API integration. Do not mix raw lifecycle calls
+with an active `OoTEngine`.
 
-## A note on the docs
-
-The public headers are the normative contract. These documents track the
-headers, but only the compiler enforces them — when a signature here disagrees
-with the header, the header wins. No ROM or extracted game asset is included in
-this repository or required to build the library; a ROM is supplied by the user
-at runtime and must never be committed to a project that uses liboot.
+The headers take precedence if a guide and the code disagree. Do not commit or
+distribute a ROM or extracted game asset with liboot; the user supplies a
+compatible ROM at runtime.

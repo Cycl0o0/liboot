@@ -35,7 +35,10 @@ jobs:
           test -f dist/LICENSE
           test -f dist/NOTICE.md
           test -f dist/README.md
+          test -f dist/docs/README.md
           test -f dist/docs/GETTING_STARTED.md
+          test -f dist/docs/USAGE.md
+          test -f dist/docs/API_REFERENCE.md
           test -f dist/docs/UNIVERSAL_SDK.md
           test -f dist/docs/ENGINE_INTEGRATION.md
           test -f dist/docs/FIDELITY.md
@@ -154,6 +157,9 @@ jobs:
           test -f "$INSTALL_PREFIX/include/liboot/liboot_engine.h"
           test -f "$INSTALL_PREFIX/share/doc/liboot/LICENSE"
           test -f "$INSTALL_PREFIX/share/doc/liboot/NOTICE.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/docs/README.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/docs/USAGE.md"
+          test -f "$INSTALL_PREFIX/share/doc/liboot/docs/API_REFERENCE.md"
           test -f "$INSTALL_PREFIX/share/doc/liboot/docs/ENGINE_INTEGRATION.md"
           test -f "$INSTALL_PREFIX/share/doc/liboot/docs/FIDELITY.md"
           test -f "$INSTALL_PREFIX/share/doc/liboot/bindings/csharp/LibOot.cs"

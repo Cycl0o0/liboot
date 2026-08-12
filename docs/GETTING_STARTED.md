@@ -9,8 +9,8 @@ Godot, Unreal, Rust, Python, and custom-engine patterns, continue with
 ## Requirements
 
 - A C11 compiler and GNU Make, or CMake 3.16 or newer.
-- Linux for the currently tested shared-library build. The public headers are
-  platform-neutral; macOS and Windows build validation is ongoing.
+- Linux or macOS. CI builds shared and static libraries on Linux x86-64,
+  Linux ARM64, and macOS. Windows is not currently supported.
 - A legally obtained, compatible Ocarina of Time ROM supplied at runtime.
   ROMs and extracted assets must not be committed to a project using liboot;
   the engine wrapper accepts buffers from `OOT_ENGINE_MIN_ROM_SIZE` (`0x1060`)
@@ -245,4 +245,4 @@ make -C test engine_api_test
 ```
 
 Press F9 or Tab in the playground for equipment, items, worlds, audio,
-rendering diagnostics, fixed-step control, and all supported ROM scenes.
+rendering diagnostics, fixed-step control, and its 18 ROM-scene presets.

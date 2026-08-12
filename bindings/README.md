@@ -1,11 +1,8 @@
 # Language bindings
 
-The preferred binding surface is the versioned, engine-neutral C API in
-[`src/liboot_engine.h`](../src/liboot_engine.h). The raw API in `liboot.h` is
-still available for advanced integrations, but it exposes more process-global
-state and requires caller-owned geometry buffers.
-
-Initial maintained binding sources:
+The repository includes two starter bindings for the engine API in
+[`src/liboot_engine.h`](../src/liboot_engine.h). They cover the common lifecycle
+and integration path but do not yet mirror every exported function:
 
 - [`cpp/liboot.hpp`](cpp/liboot.hpp) — C++11 RAII ownership, exceptions for
   `OoTResult`, and borrowed frame views.
@@ -13,9 +10,9 @@ Initial maintained binding sources:
   declarations suitable for Unity or another .NET host. See the
   [C# binding guide](csharp/README.md) for a complete lifecycle example.
 
-The native core currently supports one `OoTEngine` and one Link per process.
-Bindings cannot remove that limit. Serialize calls on one gameplay thread and
-never call liboot recursively from a native callback.
+They preserve the native ownership rules: one `OoTEngine` and one Link per
+process, serialized calls on one gameplay thread, borrowed frame pointers, and
+no callback re-entry.
 
 ## C++
 
@@ -46,9 +43,9 @@ silently abandoning the process-wide singleton.
 
 ## C# and Unity
 
-Compile with unsafe code enabled and place the platform native library where
-the runtime can resolve `liboot` (`liboot.so`, `liboot.dylib`, or `liboot.dll`).
-Check every initializer result before using its structure:
+Compile with unsafe code enabled and place `liboot.so` (Linux) or
+`liboot.dylib` (macOS) where the runtime can resolve `liboot`. Windows is not
+currently supported. Check every initializer result before using its structure:
 
 ```csharp
 LibOot.EngineConfig config = default;

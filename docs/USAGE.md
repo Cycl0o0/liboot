@@ -503,9 +503,9 @@ be reported rather than terminating.
 ## C# and Unity binding
 
 Blittable layouts and P/Invoke declarations for a .NET or Unity host. Compile
-with unsafe code enabled and place the native library (`liboot.so`,
-`liboot.dylib`, or `liboot.dll`) where the runtime can resolve `liboot`. Check
-every initializer:
+with unsafe code enabled and place `liboot.so` (Linux) or `liboot.dylib` (macOS)
+where the runtime can resolve `liboot`. Windows is not currently supported.
+Check every initializer:
 
 ```csharp
 LibOot.EngineConfig config = default;

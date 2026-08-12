@@ -1,28 +1,20 @@
 # Integrating liboot into a game engine
 
-This guide describes liboot v0.8's recommended, engine-neutral C ABI in
-[`src/liboot_engine.h`](../src/liboot_engine.h) and how to consume it from an
-engine or another language. The wrapper API version is
-`OOT_ENGINE_API_VERSION == 1`. The public headers are the final authority when
-this guide and a newer build differ.
+This guide covers liboot v0.8's C API in
+[`src/liboot_engine.h`](../src/liboot_engine.h). The host supplies a legally
+obtained ROM, collision or a ROM scene, controls, camera direction, rendering,
+audio playback, and game-specific rules. liboot supplies Player simulation,
+animation, supported actors, geometry, textures, and audio data.
 
-liboot is not a complete *Ocarina of Time* runtime. It is a host-driven Link
-simulation: the host supplies a legally obtained ROM, collision, controls, a
-camera direction, rendering, audio playback, and any game-specific logic.
-liboot supplies the original Player state machine, animation, Link and
-supported projectile actors, geometry, ROM-derived textures and selected
-audio data.
+`liboot_engine.h` uses API version `1`. It provides checked results, size-tagged
+structures, an opaque owner, fixed-step scheduling, target handles, and owned
+output buffers. [`src/liboot.h`](../src/liboot.h) remains available for existing
+raw-API hosts and unwrapped features. Do not mix its lifecycle calls with an
+active `OoTEngine`. The public headers take precedence if this guide and a build
+disagree.
 
-Start with `liboot_engine.h`. It adds checked results, versioned and size-tagged
-structures, an opaque owner, fixed-step scheduling, button latching, generation-
-checked target handles, and engine-owned output buffers around the original
-core. [`src/liboot.h`](../src/liboot.h) remains available as the advanced and
-compatibility API for existing hosts. Do not mix its raw lifecycle calls with
-an active `OoTEngine`.
-
-For the SDK's architecture and roadmap, see the
-[universal SDK overview](UNIVERSAL_SDK.md). Maintained C++ and C# sources live
-under [`bindings/`](../bindings/).
+For ABI decisions and the roadmap, see [Engine API design](UNIVERSAL_SDK.md).
+Maintained C++ and C# sources live under [`bindings/`](../bindings/).
 
 ## What an integration gets today
 
@@ -446,26 +438,28 @@ OoTResult result = oot_engine_step(engine, &input, &frame);
 if (result == OOT_ENGINE_RESULT_OK && frame != NULL) {
     const OoTEngineGeometry *geometry = &frame->geometry;
     upload_mesh(geometry->position, geometry->normal, geometry->color,
-                geometry->uv, geometry->triTexture,
+                geometry->alpha, geometry->uv, geometry->triTexture,
+                geometry->triFlags,
                 geometry->numTriangles);
 }
 ```
 
 Triangle `t` uses vertices
 `t*3` through `t*3+2`, so the output is already de-indexed. Position, normal
-and color have three floats per vertex; UV has two. Colors are normalized RGB
-material tints with no exported alpha; the host chooses the appropriate GPU
+and color have three floats per vertex; UV has two. `alpha`, when present, has
+one normalized shade-alpha value per vertex. `triFlags`, when present, has one
+`OoTTriangleFlags` byte per triangle. The host chooses the appropriate GPU
 color-space treatment. Positions and the 21-joint skeleton pose are already in
 world space.
 
 For each triangle:
 
 1. Resolve `triTexture[t]`; `0xFFFF` means untextured.
-2. Multiply the sampled RGBA by vertex RGB.
-3. Apply host lighting with the supplied world-space normal if desired.
-4. For Link and opaque scene geometry, alpha-test/discard low texture alpha
-   (a threshold around 0.5 is a practical starting point). Do not replace
-   transparent texels with white.
+2. Multiply sampled RGB by vertex RGB and sampled alpha by vertex alpha.
+3. Apply front/back culling, alpha-test, and decal depth bias from
+   `triFlags[t]`; if the pointer is null, treat the flags as zero.
+4. Apply host lighting with the supplied world-space normal if desired. Do not
+   replace transparent texels with white.
 
 The hard cap is `geometry.triangleCapacity` (currently
 `OOT_GEO_MAX_TRIANGLES`, 2048). Enable `OOT_ENGINE_RENDER_NAVI` and/or
@@ -675,8 +669,8 @@ if (result == OOT_ENGINE_RESULT_OK) {
 `outNativeResult` preserves its detailed negative code.
 `OOT_ENGINE_RESULT_SCENE_GEOMETRY_UNAVAILABLE` is the special partial result:
 scene collision was committed but room mesh output is unavailable (native
-result `-9`). The eight values in `OoTSceneIndex` are convenience constants;
-retail scene tables contain more valid indices.
+result `-9`). `OoTSceneIndex` names all retail scene-table indices from `0x00`
+through `0x64`; individual scenes still vary under the loader limits above.
 
 Spawn index 0 is the reliable entrance. Higher indices are best-effort because
 the entrance-table count is not parsed yet. Scene loading does not itself move
@@ -824,10 +818,11 @@ if (result == Result.Ok && framePointer != IntPtr.Zero) {
 `Marshal.PtrToStructure` copies only the frame structure; its geometry, actor
 and texture pointers still refer to native memory. Copy or upload them before
 the next mutating call. Update `Mesh` and create/update `Texture2D` objects on
-Unity's main thread. Group de-indexed triangles by texture into submeshes or a
-texture-array material. Apply the Unity reflection described in the coordinate
-section and reverse winding. Set vertex colors and discard low sample alpha in
-the shader; ignoring alpha creates white artifacts.
+Unity's main thread. Group de-indexed triangles by texture and the relevant
+`triFlags` into submeshes or a texture-array material. Apply the Unity
+reflection described in the coordinate section and reverse winding. Copy
+vertex shade alpha, then apply culling, cutout, and decal state per group. Keep
+the scene translucent range in its own blended pass.
 
 The maintained binding declares `DebugCallback` and `SfxCallback`. Store each
 delegate in a field until after `EngineDestroy`, obtain its pointer with
@@ -887,10 +882,12 @@ void LibootLink::_process(double delta) {
 ```
 
 Use `ArrayMesh` surface arrays (`ARRAY_VERTEX`, `ARRAY_NORMAL`, `ARRAY_COLOR`,
-`ARRAY_TEX_UV`, `ARRAY_INDEX`) grouped by texture. Cache each decoded image as
+`ARRAY_TEX_UV`, `ARRAY_INDEX`) grouped by texture and relevant `triFlags`. Cache each decoded image as
 `Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, bytes)` and
-create an `ImageTexture` on the main thread. A spatial shader should multiply
-albedo by vertex color and texture, with alpha scissor for Link/cutout passes.
+create an `ImageTexture` on the main thread. Copy vertex shade alpha. A spatial
+shader should multiply albedo by vertex color and texture, with per-surface
+culling, alpha scissor, and decal depth bias. Render the scene translucent range
+as a separate blended pass.
 
 Godot's visual forward axis is `-Z`; the sample mapping in the coordinate
 section flips both X and Z, so preserve winding when filling the mesh. Keep the liboot
@@ -946,13 +943,13 @@ Use the inverse mapping for level collision and camera-to-Link input. The
 transform reverses winding. Choose `Scale` for the project rather than
 assuming OoT units are centimetres.
 
-For a prototype, group triangles by texture into sections of
-`UProceduralMeshComponent`. For production, a dynamic mesh/Render Hardware
-Interface path or a texture array avoids rebuilding many procedural sections
-every 50 ms. Create transient `UTexture2D` resources in `PF_R8G8B8A8`, apply
-wrap modes, and update when a liboot texture revision changes. Materials need
-masked blend mode for Link/cutouts and translucent mode for the scene XLU
-pass.
+For a prototype, group triangles by texture and relevant `triFlags` into
+sections of `UProceduralMeshComponent`. Copy vertex shade alpha and set culling,
+masked alpha, and decal depth bias per section. For production, a dynamic
+mesh/Render Hardware Interface path or a texture array avoids rebuilding many
+procedural sections every 50 ms. Create transient `UTexture2D` resources in
+`PF_R8G8B8A8`, apply wrap modes, and update when a liboot texture revision
+changes. Keep the scene XLU range in a separate translucent pass.
 
 Run UObject, procedural mesh, texture and audio operations on the game thread.
 If liboot simulation is moved to a worker thread, it must be the sole owner of
@@ -1220,7 +1217,10 @@ allow exceptions to cross the native boundary.
 - [ ] Borrowed frame and texture pointers are consumed before invalidation and
       never freed by the host.
 - [ ] Link world-space geometry is not transformed twice.
-- [ ] Texture alpha, wrap modes and revision updates are honored.
+- [ ] Texture alpha, vertex shade alpha, wrap modes, and texture revisions are
+      honored.
+- [ ] Geometry is grouped by texture and relevant `triFlags`; culling,
+      alpha-test, and decal state are applied per group.
 - [ ] Scene opaque and translucent ranges use the appropriate depth/blend
       state.
 - [ ] Managed callback delegates remain rooted and callback payloads are copied.

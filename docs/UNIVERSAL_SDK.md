@@ -1,18 +1,15 @@
-# Universal engine SDK
+# Engine API design
 
-liboot's universal layer is a small, engine-neutral C ABI around the current
-Ocarina of Time Player core. It is designed to sit below Unity, Godot, Unreal,
-custom C/C++ engines, and foreign-function interfaces without making any of
-those engines a dependency of the library.
+[`src/liboot_engine.h`](../src/liboot_engine.h) is the C boundary for new host
+engines and foreign-function bindings. It owns lifecycle checks, scheduling,
+and output buffers without adding a dependency on Unity, Godot, Unreal, or any
+other host.
 
-The foundation is available in [`src/liboot_engine.h`](../src/liboot_engine.h).
-It is intentionally a pre-1.0 API: integrations should check
-`oot_engine_api_version()` against `OOT_ENGINE_API_VERSION` before any
-initializer, initialize configuration and input with the supplied
-result-returning helpers, zero output structures before direct FFI calls, and
-handle every `OoTResult`.
+The API is pre-1.0. Check `oot_engine_api_version()` before initializing a
+structure, use the supplied result-returning initializers, zero direct FFI
+outputs, and handle every `OoTResult`.
 
-## What the foundation provides
+## What the engine API provides
 
 - An opaque `OoTEngine` owner instead of exposing the raw global lifecycle.
 - Size-tagged configuration and input structures for ABI-compatible growth.
@@ -22,12 +19,11 @@ handle every `OoTResult`.
 - User-data-aware debug and SFX callbacks.
 - Static collision, water, ROM scenes, spawn points, targets, equipment,
   items, health, magic, texture views, and mapped gameplay-SFX/voice PCM views.
-- A stable C boundary suitable for C++, C#, Rust, Python, and engine plugins.
+- A C boundary usable from C++, C#, Rust, Python, and engine plugins.
 
-The original functions in [`src/liboot.h`](../src/liboot.h) remain available
-as the low-level compatibility API. New integrations should begin with
-`liboot_engine.h` and drop to `liboot.h` only when they need a feature that the
-wrapper has not exposed yet.
+[`src/liboot.h`](../src/liboot.h) remains available for existing raw-API hosts
+and for features that the engine API has not exposed. Do not mix its lifecycle
+calls with an active `OoTEngine`.
 
 ## Minimal lifecycle
 
@@ -128,7 +124,7 @@ Keep coordinate conversion in that adapter. liboot uses a right-handed,
 Y-up coordinate system and OoT world units. The host supplies a normalized
 horizontal camera-to-Link direction in `camLookX/camLookZ`.
 
-See [ENGINE_INTEGRATION.md](ENGINE_INTEGRATION.md) for complete Unity, Godot,
+See [ENGINE_INTEGRATION.md](ENGINE_INTEGRATION.md) for detailed Unity, Godot,
 Unreal, C/C++, C#, Rust, and Python patterns. Starter C++ and C# bindings live
 under [`bindings/`](../bindings/).
 
@@ -154,22 +150,23 @@ under [`bindings/`](../bindings/).
 
 ## Roadmap
 
-The next universal-SDK milestones are:
+The next engine-API milestones are:
 
 1. Move every decomp/shim global behind a true context so multiple engines and
    Links can coexist safely.
 2. Add generated ROM profiles and a published compatibility matrix instead of
    relying on structural asset discovery alone.
 3. Replace fixed geometry limits with capacity queries and draw batches that
-   identify entity, material, pass, alpha, blend, depth, and culling state.
+   identify entity, material, render pass, blend mode, and depth mode. Alpha,
+   alpha-test, decal, and culling data are already exported.
 4. Add allocator, logger, filesystem, dynamic-collision, hit-volume, and host
    world-event interfaces.
 5. Improve the internal AudioSeq mixer's envelopes, filters, effects and
    reference-capture fidelity, and expose richer spatial sound-instance
    metadata to hosts.
-6. Validate and package native builds for Linux, macOS, Windows, x86-64, and
-   ARM64, followed by maintained Unity, Godot, Unreal, Rust, and Python
-   packages.
+6. Add Windows support, followed by maintained Unity, Godot, Unreal, Rust, and
+   Python packages. The release workflow is already configured to package Linux
+   x86-64/ARM64 and macOS builds.
 
 These are roadmap items, not promises about the current release. The exact
 working boundary is documented in the public headers and the

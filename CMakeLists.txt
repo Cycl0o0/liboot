@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.16)
 project(
     liboot
     VERSION 0.8.0
-    DESCRIPTION "Engine-neutral Ocarina of Time gameplay library"
+    DESCRIPTION "Embed Ocarina of Time's Link gameplay in a host engine"
     HOMEPAGE_URL "https://github.com/Cycl0o0/liboot"
     LANGUAGES C
 )
@@ -253,6 +253,9 @@ install(
 install(
     FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/GETTING_STARTED.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/README.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/USAGE.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/API_REFERENCE.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/UNIVERSAL_SDK.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/ENGINE_INTEGRATION.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/FIDELITY.md"

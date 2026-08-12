@@ -9,11 +9,11 @@ function carries the `OOT_LIB_FN` linkage macro.
 For worked examples see [USAGE.md](USAGE.md). The headers themselves remain the
 normative source; this document tracks them but the compiler does not.
 
-- [Engine API (`liboot_engine.h`)](#engine-api-liboot_enginehh)
+- [Engine API (`liboot_engine.h`)](#engine-api-liboot_engineh)
   - [Constants](#engine-constants) · [Results](#ootresult) ·
     [Enums](#engine-enums) · [Structs](#engine-structs) ·
     [Functions](#engine-functions)
-- [Low-level API (`liboot.h`)](#low-level-api-liboothh)
+- [Low-level API (`liboot.h`)](#low-level-api-libooth)
   - [Constants](#low-level-constants) · [Enums](#low-level-enums) ·
     [Structs](#low-level-structs) · [Functions](#low-level-functions)
 - [Notes on the two APIs](#notes-on-the-two-apis)
