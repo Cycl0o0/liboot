@@ -26,6 +26,7 @@ compile_commands.json
 /test/audio_catalog_test
 /test/audio_sequence_test
 /test/enemy_bgm_test
+/test/engine_limits_test
 /test/fidelity_runner
 /test/playground
 /examples/basic
@@ -51,6 +52,8 @@ compile_commands.json
 *.xdelta
 
 # Local tooling and editor state
+__pycache__/
+*.py[cod]
 .DS_Store
 .idea/
 .vscode/

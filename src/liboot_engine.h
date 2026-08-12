@@ -37,6 +37,8 @@ extern "C" {
 #define OOT_ENGINE_MAX_ACTOR_CAPACITY 4096u
 #define OOT_ENGINE_MAX_STATIC_SURFACES 2730u
 #define OOT_ENGINE_MAX_WATER_BOXES 65535u
+#define OOT_ENGINE_MAX_TARGETS 16u
+#define OOT_ENGINE_MAX_TEXTURES OOT_TEXTURE_MAX_COUNT
 #define OOT_ENGINE_MIN_ROM_SIZE 0x1060u
 #define OOT_ENGINE_MAX_ROM_SIZE (256u * 1024u * 1024u)
 #define OOT_ENGINE_MAX_SUBSTEPS 1000u
@@ -46,6 +48,48 @@ extern "C" {
 
 typedef struct OoTEngine OoTEngine;
 typedef uint32_t OoTEngineTarget;
+
+#define OOT_ENGINE_LIMITS_VERSION 1u
+
+/* Stable feature discovery for hosts that load liboot dynamically. A missing
+   bit means the corresponding API contract must not be assumed. */
+enum OoTEngineCapabilities
+{
+    OOT_ENGINE_CAPABILITY_STATIC_WORLD = 1u << 0,
+    OOT_ENGINE_CAPABILITY_ROM_SCENE_LOADING = 1u << 1,
+    OOT_ENGINE_CAPABILITY_LINK_GEOMETRY = 1u << 2,
+    OOT_ENGINE_CAPABILITY_SCENE_GEOMETRY = 1u << 3,
+    OOT_ENGINE_CAPABILITY_GEOMETRY_TRUNCATION = 1u << 4,
+    OOT_ENGINE_CAPABILITY_ACTOR_QUERY = 1u << 5,
+    OOT_ENGINE_CAPABILITY_TARGETS = 1u << 6,
+    OOT_ENGINE_CAPABILITY_TEXTURES = 1u << 7,
+    OOT_ENGINE_CAPABILITY_FIXED_STEP = 1u << 8,
+    OOT_ENGINE_CAPABILITY_AUDIO = 1u << 9,
+    OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON = 1u << 10
+};
+
+/* Process-independent compile-time limits. Initialize structSize and version
+   (OOT_ENGINE_LIMITS_INIT does this) before oot_engine_get_limits. The getter
+   accepts a prefix through capabilityFlags and never writes past structSize;
+   fields added in a later library therefore remain optional to older hosts. */
+typedef struct OoTEngineLimits
+{
+    uint32_t structSize;
+    uint32_t version;
+    uint64_t capabilityFlags;       /* enum OoTEngineCapabilities bit mask */
+    uint32_t linkTriangleCapacity;
+    uint32_t sceneTriangleCapacity;
+    uint32_t staticSurfaceCapacity;
+    uint32_t waterBoxCapacity;
+    uint32_t maxActorCapacity;
+    uint32_t targetCapacity;
+    uint32_t textureCapacity;
+    uint32_t maxSubsteps;
+    float minFixedStepSeconds;
+    float maxFixedStepSeconds;
+    float defaultFixedStepSeconds;
+    uint32_t defaultMaxSubsteps;
+} OoTEngineLimits;
 
 typedef enum OoTResult
 {
@@ -202,7 +246,10 @@ typedef struct OoTEngineFrame
     uint32_t actorCapacity;
     uint8_t actorListTruncated;
     uint8_t skeletonAvailable;
-    uint8_t reserved[2];
+    /* Set only when otherwise valid triangles were omitted from this frame's
+       Link/Navi/actor geometry because triangleCapacity was reached. */
+    uint8_t linkGeometryTruncated;
+    uint8_t reserved0;
     struct OoTSkeletonPose skeleton;
     OoTEngineNaviState navi;
 } OoTEngineFrame;
@@ -259,6 +306,11 @@ typedef struct OoTEnginePcm
 #define OOT_ENGINE_INPUT_INIT \
     { sizeof(OoTEngineInput), 0.0f, 1.0f, 0.0f, 0.0f, 0u }
 
+#define OOT_ENGINE_LIMITS_INIT \
+    { sizeof(OoTEngineLimits), OOT_ENGINE_LIMITS_VERSION, 0u, \
+      0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, \
+      0.0f, 0.0f, 0.0f, 0u }
+
 /* ABI layout guards (see OOT_STATIC_ASSERT in liboot.h).
  *
  * OoTResult crosses the ABI as a plain 32-bit signed integer; the first guard
@@ -275,6 +327,13 @@ typedef struct OoTEnginePcm
 OOT_STATIC_ASSERT(sizeof(OoTResult) == 4, "OoTResult must cross the ABI as int32");
 
 OOT_STATIC_ASSERT(sizeof(OoTEngineInput) == 24, "OoTEngineInput ABI changed");
+OOT_STATIC_ASSERT(sizeof(OoTEngineLimits) == 64, "OoTEngineLimits ABI changed");
+OOT_STATIC_ASSERT(offsetof(OoTEngineLimits, structSize) == 0,
+                  "OoTEngineLimits.structSize must be first");
+OOT_STATIC_ASSERT(offsetof(OoTEngineLimits, version) == 4,
+                  "OoTEngineLimits.version ABI changed");
+OOT_STATIC_ASSERT(offsetof(OoTEngineLimits, capabilityFlags) == 8,
+                  "OoTEngineLimits.capabilityFlags ABI changed");
 OOT_STATIC_ASSERT(sizeof(OoTEngineLinkState) == 92, "OoTEngineLinkState ABI changed");
 OOT_STATIC_ASSERT(offsetof(OoTEngineLinkState, animId) == 90,
                   "OoTEngineLinkState.animId must occupy the former tail padding");
@@ -289,11 +348,23 @@ OOT_STATIC_ASSERT(offsetof(OoTEngineFrame, structSize) == 0, "structSize must be
 OOT_STATIC_ASSERT(offsetof(OoTEngineSceneGeometry, structSize) == 0, "structSize must be first");
 OOT_STATIC_ASSERT(offsetof(OoTEngineTexture, structSize) == 0, "structSize must be first");
 OOT_STATIC_ASSERT(offsetof(OoTEnginePcm, structSize) == 0, "structSize must be first");
+OOT_STATIC_ASSERT(offsetof(OoTEngineFrame, linkGeometryTruncated) ==
+                      offsetof(OoTEngineFrame, skeletonAvailable) + 1,
+                  "OoTEngineFrame truncation flag must occupy reserved ABI storage");
+OOT_STATIC_ASSERT(offsetof(OoTEngineFrame, reserved0) ==
+                      offsetof(OoTEngineFrame, linkGeometryTruncated) + 1,
+                  "OoTEngineFrame reserved byte ABI offset changed");
 
 #if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
 OOT_STATIC_ASSERT(sizeof(OoTEngineConfig) == 72, "OoTEngineConfig ABI changed (LP64/LLP64)");
 OOT_STATIC_ASSERT(sizeof(OoTEngineGeometry) == 72, "OoTEngineGeometry ABI changed (LP64/LLP64)");
 OOT_STATIC_ASSERT(sizeof(OoTEngineSceneGeometry) == 80, "OoTEngineSceneGeometry ABI changed (LP64/LLP64)");
+OOT_STATIC_ASSERT(offsetof(OoTEngineFrame, linkGeometryTruncated) == 210,
+                  "OoTEngineFrame truncation flag ABI offset changed (LP64/LLP64)");
+OOT_STATIC_ASSERT(offsetof(OoTEngineSceneGeometry, alpha) == 64,
+                  "OoTEngineSceneGeometry.alpha ABI offset changed");
+OOT_STATIC_ASSERT(offsetof(OoTEngineSceneGeometry, triFlags) == 72,
+                  "OoTEngineSceneGeometry.triFlags ABI offset changed");
 OOT_STATIC_ASSERT(sizeof(OoTEngineTexture) == 32, "OoTEngineTexture ABI changed (LP64/LLP64)");
 OOT_STATIC_ASSERT(sizeof(OoTEnginePcm) == 32, "OoTEnginePcm ABI changed (LP64/LLP64)");
 OOT_STATIC_ASSERT(sizeof(OoTEngineFrame) == 544, "OoTEngineFrame ABI changed (LP64/LLP64)");
@@ -301,6 +372,9 @@ OOT_STATIC_ASSERT(sizeof(OoTEngineFrame) == 544, "OoTEngineFrame ABI changed (LP
 
 extern OOT_LIB_FN uint32_t oot_engine_api_version(void);
 extern OOT_LIB_FN const char *oot_engine_result_string(OoTResult result);
+/* Does not create, lock, or otherwise require an OoTEngine. Invalid size or
+   version input is rejected without modifying the caller's memory. */
+extern OOT_LIB_FN OoTResult oot_engine_get_limits(OoTEngineLimits *outLimits);
 
 /* Safe initializers for dynamic-language/FFI consumers. They validate the
    caller's compiled struct size and API version before writing anything, and
@@ -381,6 +455,11 @@ extern OOT_LIB_FN OoTResult oot_engine_scene_load(OoTEngine *engine,
                                                   int32_t *outNativeResult);
 extern OOT_LIB_FN OoTResult oot_engine_scene_get_geometry(
     OoTEngine *engine, const OoTEngineSceneGeometry **outGeometry);
+/* Exact number of triangles omitted from the engine's current copied scene
+   geometry. Unlike the raw process-global query, this validates and guards the
+   engine handle. Returns NOT_AVAILABLE until a scene mesh is available. */
+extern OOT_LIB_FN OoTResult oot_engine_scene_get_dropped_triangles(
+    OoTEngine *engine, uint32_t *outDroppedTriangles);
 /* liboot vNEXT: door-driven room transitions. set_room swaps the active room
    (roomIndex -1 = whole scene); get_door_count/get_door expose the scene's
    transition actors so a host can detect a crossing and call set_room. */

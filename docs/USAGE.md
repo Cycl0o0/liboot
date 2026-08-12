@@ -37,6 +37,15 @@ full symbol list see [API_REFERENCE.md](API_REFERENCE.md).
 The ROM is copied during `oot_engine_create`, so the caller may free its buffer
 as soon as the call returns.
 
+Query compile-time limits before loading a ROM when sizing host-side storage:
+
+```c
+OoTEngineLimits limits = OOT_ENGINE_LIMITS_INIT;
+require_ok(oot_engine_get_limits(&limits));
+printf("Link triangles: %u, scene triangles: %u\n",
+       limits.linkTriangleCapacity, limits.sceneTriangleCapacity);
+```
+
 ```c
 #include "liboot_engine.h"
 

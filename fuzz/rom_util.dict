@@ -1,0 +1,8 @@
+# N64 ROM byte-order magics and the formats recognized by src/rom_util.c.
+z64_magic="\x80\x37\x12\x40"
+v64_magic="\x37\x80\x40\x12"
+n64_magic="\x40\x12\x37\x80"
+oot_game_code="NZLE"
+dmadata_first_entry="\x00\x00\x00\x00\x00\x00\x10\x60\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x60"
+yaz0_magic="Yaz0"
+literal_group="\xff"

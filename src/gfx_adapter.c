@@ -53,7 +53,7 @@ typedef struct {
 /* ---- runtime texture cache (decoded from the caller's ROM) ------------- */
 /* Raised for full multi-room dungeon loads: every room's distinct seg-3
    textures are cached at once (see roomGen below). */
-#define MAX_TEXTURES 1024
+#define MAX_TEXTURES OOT_TEXTURE_MAX_COUNT
 typedef struct {
     u32 dataAddr, palAddr;
     u8 fmt, siz;
@@ -97,6 +97,10 @@ typedef struct {
 } TmemSlot;
 static TexEntry sTexCache[MAX_TEXTURES];
 static int sTexCount;
+/* Kept separately because Link rendering and scene interpretation share the
+   interpreter state and can run one after the other. */
+static uint32_t sLinkDroppedTriangles;
+static uint32_t sSceneDroppedTriangles;
 /* Monotonic across the whole process, NOT reset by terminate: after a
    re-init a reused index gets a strictly larger revision, so consumers that
    cache uploads by (index, revision) always see "pixels changed". */
@@ -110,6 +114,8 @@ void liboot_gfx_terminate( void )
         free( sTexCache[i].rgba );
     memset( sTexCache, 0, sizeof( sTexCache ));
     sTexCount = 0;
+    sLinkDroppedTriangles = 0;
+    sSceneDroppedTriangles = 0;
 }
 
 static struct {
@@ -143,6 +149,7 @@ static struct {
     TmemSlot tmemMap[TMEM_MAP_SLOTS];
     int tmemNext;
     int maxTris;                  /* per-walk triangle cap (scene > Link) */
+    uint32_t *droppedTriangles;   /* Link or scene counter for this walk */
     float texScaleS, texScaleT;
     int texEnabled;               /* combiner references TEXEL0/TEXEL1 */
     int envMul;                   /* combiner multiplies texel by ENVIRONMENT */
@@ -626,8 +633,14 @@ static float shift_factor( u8 shift )
 static void emit_tri( int a, int b, int c )
 {
     struct OoTLinkGeometryBuffers *o = s_gfx.out;
-    if( !o || o->numTrianglesUsed >= s_gfx.maxTris ) return;
-    if( a >= VTX_CACHE || b >= VTX_CACHE || c >= VTX_CACHE ) return;
+    if( !o ) return;
+    if( a < 0 || b < 0 || c < 0 ||
+        a >= VTX_CACHE || b >= VTX_CACHE || c >= VTX_CACHE ) return;
+    if( o->numTrianglesUsed >= s_gfx.maxTris ) {
+        if( s_gfx.droppedTriangles && *s_gfx.droppedTriangles != UINT32_MAX )
+            ( *s_gfx.droppedTriangles )++;
+        return;
+    }
     /* Lazy bind: real hardware pairs texel data + TLUT from TMEM state at
        draw time.  Several materials (hands/gauntlet/shield/sheath family)
        run LOADTLUT *after* SETTILESIZE but before their triangles, so
@@ -1029,6 +1042,8 @@ static void liboot_render_navi( Actor *navi, SkelAnime *sk )
         navi->scale.x <= 0.0f ) return;
     SkeletonWalkGuard guard = { 0, NAVI_RENDER_LIMBS, 0, 0 };
     int trianglesBefore = s_gfx.out ? s_gfx.out->numTrianglesUsed : 0;
+    uint32_t droppedBefore = s_gfx.droppedTriangles
+        ? *s_gfx.droppedTriangles : 0u;
 
     s_gfx.lighting = 0;
     s_gfx.curTex = -1;
@@ -1062,8 +1077,11 @@ static void liboot_render_navi( Actor *navi, SkelAnime *sk )
         navi_walk_limb( skeleton, sk->jointTable, rootLimb->child, 1, &guard );
 
     Matrix_Pop();
-    if(( guard.invalid || guard.walkCount != guard.limbCount ) && s_gfx.out )
+    if(( guard.invalid || guard.walkCount != guard.limbCount ) && s_gfx.out ) {
         s_gfx.out->numTrianglesUsed = trianglesBefore;
+        if( s_gfx.droppedTriangles )
+            *s_gfx.droppedTriangles = droppedBefore;
+    }
 }
 
 /* ---- Projectile actors: capture-replay (liboot v0.6) -------------------- */
@@ -1248,12 +1266,14 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
     SkelAnime *sk = &player->skelAnime;
     void **skeleton = sk->skeleton;
 
+    sLinkDroppedTriangles = 0;
     out->numTrianglesUsed = 0;
     if( !skeleton || !sk->jointTable || sk->limbCount != LINK_RENDER_LIMBS + 1 ) return;
 
     memset( &s_gfx, 0, sizeof( s_gfx ));
     s_gfx.out = out;
     s_gfx.maxTris = OOT_GEO_MAX_TRIANGLES;
+    s_gfx.droppedTriangles = &sLinkDroppedTriangles;
     s_gfx.cmdBudget = MAX_CMDS;
     s_gfx.lighting = 1;
     s_gfx.curTex = -1;
@@ -1339,6 +1359,7 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
     Matrix_Pop();
     if( sLinkWalk.invalid || sLinkWalk.walkCount != sLinkWalk.limbCount ) {
         out->numTrianglesUsed = 0;
+        sLinkDroppedTriangles = 0;
         return;
     }
 
@@ -1384,9 +1405,11 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
    Called only by src/scene.c. */
 void liboot_scene_dl_begin( struct OoTLinkGeometryBuffers *out, int maxTris )
 {
+    sSceneDroppedTriangles = 0;
     memset( &s_gfx, 0, sizeof( s_gfx ));
     s_gfx.out = out;
     s_gfx.maxTris = maxTris > 0 ? maxTris : OOT_GEO_MAX_TRIANGLES;
+    s_gfx.droppedTriangles = &sSceneDroppedTriangles;
     s_gfx.cmdBudget = MAX_CMDS;
     s_gfx.lighting = 1;               /* room tris are lit (real normals) */
     s_gfx.curTex = -1;
@@ -1407,6 +1430,16 @@ void liboot_scene_dl_begin( struct OoTLinkGeometryBuffers *out, int maxTris )
 void liboot_scene_dl_run( u32 dlAddr )
 {
     run_dl( (uintptr_t)dlAddr, 0 );
+}
+
+uint32_t oot_link_get_geometry_dropped_triangles( void )
+{
+    return sLinkDroppedTriangles;
+}
+
+uint32_t oot_scene_get_geometry_dropped_triangles( void )
+{
+    return sSceneDroppedTriangles;
 }
 
 /* ---- public texture accessors ------------------------------------------ */

@@ -21,13 +21,45 @@ static int read_file(const char *path, uint8_t **outData, size_t *outSize)
         fprintf(stderr, "%s: %s\n", path, strerror(errno));
         return 0;
     }
-    if (fseek(file, 0, SEEK_END) != 0 || (length = ftell(file)) <= 0 ||
-        fseek(file, 0, SEEK_SET) != 0) {
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fprintf(stderr, "%s: could not determine ROM size\n", path);
+        fclose(file);
+        return 0;
+    }
+    length = ftell(file);
+    if (length < (long)OOT_ENGINE_MIN_ROM_SIZE ||
+        (uintmax_t)length > (uintmax_t)OOT_ENGINE_MAX_ROM_SIZE) {
+        fprintf(stderr, "%s: ROM size must be %u..%u bytes\n", path,
+                (unsigned)OOT_ENGINE_MIN_ROM_SIZE,
+                (unsigned)OOT_ENGINE_MAX_ROM_SIZE);
+        fclose(file);
+        return 0;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "%s: could not rewind ROM\n", path);
         fclose(file);
         return 0;
     }
     data = (uint8_t *)malloc((size_t)length);
-    if (data == NULL || fread(data, 1, (size_t)length, file) != (size_t)length) {
+    if (data == NULL) {
+        fprintf(stderr, "%s: could not allocate %ld bytes\n", path, length);
+        fclose(file);
+        return 0;
+    }
+    if (fread(data, 1, (size_t)length, file) != (size_t)length) {
+        fprintf(stderr, "%s: could not read ROM\n", path);
+        free(data);
+        fclose(file);
+        return 0;
+    }
+    if (fgetc(file) != EOF) {
+        fprintf(stderr, "%s: ROM size changed while it was being read\n", path);
+        free(data);
+        fclose(file);
+        return 0;
+    }
+    if (ferror(file)) {
+        fprintf(stderr, "%s: could not finish reading ROM\n", path);
         free(data);
         fclose(file);
         return 0;
@@ -63,7 +95,7 @@ int main(int argc, char **argv)
     int exitCode = 1;
 
     if (argc != 2) {
-        fprintf(stderr, "usage: %s <legally-obtained-oot-rom.z64>\n", argv[0]);
+        fprintf(stderr, "usage: %s <legally-obtained-oot-rom>\n", argv[0]);
         return 2;
     }
     if (!read_file(argv[1], &rom, &romSize)) {

@@ -29,6 +29,7 @@ oot_engine_config_init_sized
 oot_engine_create
 oot_engine_destroy
 oot_engine_get_frame
+oot_engine_get_limits
 oot_engine_get_render_flags
 oot_engine_input_init_sized
 oot_engine_link_create
@@ -48,6 +49,7 @@ oot_engine_result_string
 oot_engine_scene_get_ambience_id
 oot_engine_scene_get_door
 oot_engine_scene_get_door_count
+oot_engine_scene_get_dropped_triangles
 oot_engine_scene_get_environment
 oot_engine_scene_get_geometry
 oot_engine_scene_get_runtime
@@ -78,6 +80,7 @@ oot_link_create
 oot_link_damage
 oot_link_delete
 oot_link_freeze
+oot_link_get_geometry_dropped_triangles
 oot_link_get_skeleton
 oot_link_set_age
 oot_link_set_equipment
@@ -96,6 +99,7 @@ oot_scene_get_door
 oot_scene_get_door_count
 oot_scene_get_environment
 oot_scene_get_geometry
+oot_scene_get_geometry_dropped_triangles
 oot_scene_get_runtime
 oot_scene_get_sequence_id
 oot_scene_get_triangle_flags

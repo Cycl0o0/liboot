@@ -1,4 +1,5 @@
 HOST_OS := $(shell uname -s)
+PYTHON3 ?= python3
 ifeq ($(HOST_OS),Darwin)
 LIBOOT_LIBRARY   := ../dist/liboot.dylib
 RPATH_FLAG       := -Wl,-rpath,@loader_path/../dist
@@ -11,7 +12,23 @@ OPENGL_LIBS      := -lGL
 LIBRARY_PATH_ENV := LD_LIBRARY_PATH=../dist
 endif
 
-all: headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test audio_overflow_test enemy_bgm_test fidelity_runner audio_catalog_test audio_sequence_test
+ROM_FREE_TESTS := engine_init_test rom_util_test audio_overflow_test \
+		  enemy_bgm_test engine_limits_test fidelity_runner
+ROM_BACKED_TESTS := headless equip_test voicetest asset_test engine_api_test \
+		    audio_catalog_test audio_sequence_test
+
+# `all`/the repository's `make test` compile every test program. Use
+# `make check` to build and execute the complete ROM-free test suite.
+all: $(ROM_FREE_TESTS) $(ROM_BACKED_TESTS)
+
+check: $(ROM_FREE_TESTS)
+	$(LIBRARY_PATH_ENV) ./engine_init_test
+	./rom_util_test
+	./audio_overflow_test
+	$(LIBRARY_PATH_ENV) ./enemy_bgm_test
+	$(LIBRARY_PATH_ENV) ./engine_limits_test
+	$(LIBRARY_PATH_ENV) ./fidelity_runner --self-test
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON3) rom_identity_test.py
 
 headless: headless.c $(LIBOOT_LIBRARY)
 	cc -g -rdynamic -I../dist/include headless.c -o headless -L../dist -loot -lm $(RPATH_FLAG)
@@ -53,6 +70,11 @@ enemy_bgm_test: enemy_bgm_test.c $(LIBOOT_LIBRARY)
 		enemy_bgm_test.c -o enemy_bgm_test -L../dist -loot \
 		$(RPATH_FLAG)
 
+engine_limits_test: engine_limits_test.c $(LIBOOT_LIBRARY)
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+		engine_limits_test.c -o engine_limits_test -L../dist -loot \
+		$(RPATH_FLAG)
+
 # ROM-backed audio tests take a ROM path at runtime; no copyrighted data is
 # embedded in either binary.
 audio_catalog_test: audio_catalog_test.c ../src/audio_extract.c ../src/rom_util.c
@@ -73,9 +95,9 @@ fidelity_runner: fidelity_runner.c $(LIBOOT_LIBRARY)
 		fidelity_runner.c -o fidelity_runner -L../dist -loot -lm \
 		$(RPATH_FLAG)
 clean:
-	rm -f headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test audio_overflow_test fidelity_runner audio_catalog_test audio_sequence_test playground csharp_init_test.exe
+	rm -f headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test audio_overflow_test enemy_bgm_test engine_limits_test fidelity_runner audio_catalog_test audio_sequence_test playground csharp_init_test.exe
 	rm -rf playground.dSYM
-.PHONY: all clean playground
+.PHONY: all check clean playground
 
 playground: playground.c playground_ui.c playground_ui.h $(LIBOOT_LIBRARY)
 	cc -std=c11 -g -Wall -Wextra -Wpedantic -rdynamic -I../dist/include playground.c playground_ui.c -o playground -L../dist -loot $(shell pkg-config --cflags --libs sdl2) $(OPENGL_LIBS) -lm $(RPATH_FLAG)

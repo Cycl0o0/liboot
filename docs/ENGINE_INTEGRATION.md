@@ -468,6 +468,8 @@ The hard cap is `geometry.triangleCapacity` (currently
 There are no ranges identifying which actor emitted which triangles, and the
 combined output can reach the cap. Keep these flags off if the integration
 needs Link-only topology, and use frame actor snapshots plus host proxy meshes.
+If `frame->linkGeometryTruncated` is nonzero, the stream hit that cap and is
+incomplete; do not infer truncation merely because the count equals capacity.
 
 Navi's glowing body is deliberately not in the triangle output. When
 `frame->navi.available` is nonzero, draw a camera-facing soft sprite at its
@@ -515,6 +517,8 @@ After `oot_engine_scene_load` succeeds,
 core, with the same vertex layout and texture cache as Link. Treat the view as
 borrowed and consume it before replacing the world/scene or destroying the
 engine. Its `triangleCapacity` is currently `OOT_SCENE_MAX_TRIANGLES` (16384).
+Call `oot_engine_scene_get_dropped_triangles` after retrieving it. A nonzero
+result means the returned scene mesh is a prefix capped at that capacity.
 
 Draw `[0, xluStartTriangle)` as the opaque/cutout pass with depth writes.
 Draw `[xluStartTriangle, numTriangles)` afterwards with source-alpha blending

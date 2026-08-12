@@ -118,6 +118,42 @@ entry points for hosts that manage structure sizes themselves. Callers using
 them directly must perform the same `EngineApiVersionGet()` check first and
 pass `Native.EngineApiVersion` as `apiVersion`.
 
+## Scene and PCM views
+
+`Native.GetEngineLimits(out limits)` fills the versioned capacity/capability
+record without requiring an engine handle. After stepping, check
+`EngineFrame.LinkGeometryTruncated`; after a scene load, call
+`Native.EngineSceneGetDroppedTriangles` to detect a capped mesh.
+
+The scene geometry getter returns a pointer to one native
+`EngineSceneGeometry` record. Marshal the record, then consume its array
+pointers before loading another scene or room:
+
+```csharp
+IntPtr geometryPointer;
+Check(Native.EngineSceneGetGeometry(engine, out geometryPointer),
+    "get scene geometry");
+EngineSceneGeometry geometry = (EngineSceneGeometry)Marshal.PtrToStructure(
+    geometryPointer, typeof(EngineSceneGeometry));
+```
+
+`EngineSceneGetSpawn` writes three floats and an optional yaw. Call it from an
+unsafe context with pinned or stack-allocated output storage. The PCM getters
+fill a value record whose `Samples` pointer remains native-owned until engine
+destruction:
+
+```csharp
+EnginePcm voice = new EnginePcm();
+Check(Native.EngineVoiceGet(engine, 0x1800, ref voice), "get voice PCM");
+
+EnginePcm note = new EnginePcm();
+Check(Native.EngineOcarinaNoteGet(engine, 0, ref note), "get ocarina PCM");
+```
+
+Enable or disable proximity-driven battle music with
+`Native.EngineSetEnemyBgm(engine, true)` and serialize it against the audio
+render callback just like other AudioSeq control calls.
+
 ## Gameplay values and native views
 
 The public `Age`, `Sword`, `Shield`, `Tunic`, `Boots`, `Item`, `Scene`, and
@@ -128,8 +164,7 @@ list; the `int` overload of `EngineSceneLoad` accepts any valid game scene
 index.
 
 Frame, geometry, texture, actor, PCM, and callback pointers are native-owned
-borrowed views. Copy data that must survive the next documented invalidating
-call, and never free those pointers from managed code. An SFX callback receives
-an `IntPtr` valid only for the duration of the callback; marshal it as
-`SfxEvent` and enqueue a copy rather than calling back into the engine from the
-callback.
+borrowed views. Copy data that must survive its documented lifetime, and never
+free those pointers from managed code. An SFX callback receives an `IntPtr`
+valid only for the duration of the callback; marshal it as `SfxEvent` and
+enqueue a copy rather than calling back into the engine from the callback.

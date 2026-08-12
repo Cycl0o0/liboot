@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Cycl0o0
+#
 # Refresh the decomp translation units listed in vendor-list.txt (one
 # repo-relative path per line, '#' comments allowed) from $OOT (default
 # ~/oot-decomp), preserving relative paths. The required header/asset-
@@ -6,11 +9,59 @@
 # this helper. Re-running this script overwrites local source patches; inspect
 # the resulting diff and reapply the integration changes listed in NOTICE.md.
 set -eu
+
+UPSTREAM_COMMIT=269d03016cd0e3d7a0b8925e02b97a319c1d0e8d
 OOT="${OOT:-$HOME/oot-decomp}"
-cd "$(dirname "$0")/.."
+
+if ! git -C "$OOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "vendor: OOT is not a git checkout: $OOT" >&2
+    exit 1
+fi
+
+actual_commit=$(git -C "$OOT" rev-parse HEAD)
+if [ "$actual_commit" != "$UPSTREAM_COMMIT" ]; then
+    echo "vendor: expected zeldaret/oot $UPSTREAM_COMMIT, found $actual_commit" >&2
+    exit 1
+fi
+if [ -n "$(git -C "$OOT" status --porcelain --untracked-files=normal)" ]; then
+    echo "vendor: upstream checkout has tracked or untracked changes; use a clean pinned checkout" >&2
+    exit 1
+fi
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+list="$root/tools/vendor-list.txt"
+
+# Validate the whole copy set before changing the vendored tree.
 while IFS= read -r f; do
     case "$f" in ''|'#'*) continue;; esac
-    mkdir -p "src/decomp/$(dirname "$f")"
-    cp "$OOT/$f" "src/decomp/$f"
+    case "$f" in
+        /*|..|../*|*/..|*/../*)
+            echo "vendor: unsafe path in vendor-list.txt: $f" >&2
+            exit 1
+            ;;
+    esac
+    if [ ! -f "$OOT/$f" ]; then
+        echo "vendor: missing upstream file: $f" >&2
+        exit 1
+    fi
+done < "$list"
+
+if [ "${1:-}" = "--check" ]; then
+    echo "vendor: clean zeldaret/oot checkout pinned at $UPSTREAM_COMMIT"
+    exit 0
+fi
+if [ "$#" -gt 0 ]; then
+    echo "usage: OOT=/path/to/oot-decomp tools/vendor.sh [--check]" >&2
+    exit 2
+fi
+
+while IFS= read -r f; do
+    case "$f" in ''|'#'*) continue;; esac
+    mkdir -p "$root/src/decomp/$(dirname "$f")"
+    cp "$OOT/$f" "$root/src/decomp/$f"
     echo "vendored $f"
-done < tools/vendor-list.txt
+done < "$list"
+
+echo "vendor: raw translation units refreshed from $UPSTREAM_COMMIT"
+echo "vendor: reapply the integration patches listed in NOTICE.md, then run:"
+echo "  tools/check-vendor.py --write"

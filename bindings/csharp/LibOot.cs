@@ -125,6 +125,23 @@ namespace LibOot
         CUp = 1u << 5,
     }
 
+    [Flags]
+    public enum EngineCapabilities : ulong
+    {
+        None = 0,
+        StaticWorld = 1ul << 0,
+        RomSceneLoading = 1ul << 1,
+        LinkGeometry = 1ul << 2,
+        SceneGeometry = 1ul << 3,
+        GeometryTruncation = 1ul << 4,
+        ActorQuery = 1ul << 5,
+        Targets = 1ul << 6,
+        Textures = 1ul << 7,
+        FixedStep = 1ul << 8,
+        Audio = 1ul << 9,
+        ProcessSingleton = 1ul << 10,
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void DebugCallback(IntPtr userData, IntPtr message);
 
@@ -157,6 +174,26 @@ namespace LibOot
         public float StickX;
         public float StickY;
         public Buttons Buttons;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct EngineLimits
+    {
+        public uint StructSize;
+        public uint Version;
+        public EngineCapabilities CapabilityFlags;
+        public uint LinkTriangleCapacity;
+        public uint SceneTriangleCapacity;
+        public uint StaticSurfaceCapacity;
+        public uint WaterBoxCapacity;
+        public uint MaxActorCapacity;
+        public uint TargetCapacity;
+        public uint TextureCapacity;
+        public uint MaxSubsteps;
+        public float MinFixedStepSeconds;
+        public float MaxFixedStepSeconds;
+        public float DefaultFixedStepSeconds;
+        public uint DefaultMaxSubsteps;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -389,7 +426,8 @@ namespace LibOot
         public uint ActorCapacity;
         public byte ActorListTruncated;
         public byte SkeletonAvailable;
-        public fixed byte Reserved[2];
+        public byte LinkGeometryTruncated;
+        public byte Reserved0;
         public SkeletonPose Skeleton;
         public EngineNaviState Navi;
     }
@@ -449,6 +487,7 @@ namespace LibOot
     {
         public const string LibraryName = "liboot";
         public const uint EngineApiVersion = 1;
+        public const uint EngineLimitsVersion = 1;
         public const float DefaultFixedStep = 1.0f / 20.0f;
         public const uint InvalidTarget = 0;
         public const ushort AudioSequenceCatalogCount = 110;
@@ -463,6 +502,18 @@ namespace LibOot
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_api_version")]
         public static extern uint EngineApiVersionGet();
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_get_limits")]
+        public static extern Result EngineGetLimits(ref EngineLimits limits);
+
+        public static Result GetEngineLimits(out EngineLimits limits)
+        {
+            limits = new EngineLimits();
+            limits.StructSize = (uint)Marshal.SizeOf(typeof(EngineLimits));
+            limits.Version = EngineLimitsVersion;
+            return EngineGetLimits(ref limits);
+        }
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_result_string")]
@@ -776,6 +827,11 @@ namespace LibOot
             out IntPtr geometry);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_dropped_triangles")]
+        public static extern Result EngineSceneGetDroppedTriangles(IntPtr engine,
+            out uint droppedTriangles);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_scene_get_spawn")]
         public static extern Result EngineSceneGetSpawn(IntPtr engine,
             int spawnIndex, float* position, short* yaw);
@@ -828,6 +884,11 @@ namespace LibOot
             EntryPoint = "oot_engine_ocarina_note_get")]
         public static extern Result EngineOcarinaNoteGet(IntPtr engine,
             byte noteIndex, ref EnginePcm pcm);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_set_enemy_bgm")]
+        public static extern Result EngineSetEnemyBgm(IntPtr engine,
+            [MarshalAs(UnmanagedType.I1)] bool enabled);
 
         // Stateless ocarina-song helpers (raw API — no engine handle needed).
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,

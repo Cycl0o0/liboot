@@ -16,7 +16,7 @@ engine: engine.c $(LIBOOT_LIBRARY) ../dist/include/liboot_engine.h
 	$(CC) $(CFLAGS) -I../dist/include engine.c -o engine -L../dist -loot \
 		$(RPATH_FLAG)
 
-basic: basic.c $(LIBOOT_LIBRARY) ../dist/include/liboot.h
+basic: basic.c $(LIBOOT_LIBRARY) ../dist/include/liboot.h ../dist/include/liboot_engine.h
 	$(CC) $(CFLAGS) -I../dist/include basic.c -o basic -L../dist -loot \
 		$(RPATH_FLAG)
 

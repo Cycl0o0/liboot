@@ -448,6 +448,9 @@ extern OOT_LIB_FN bool oot_ocarina_song_notes( int32_t song, uint8_t outNotes[8]
 extern OOT_LIB_FN int32_t oot_ocarina_match( const uint8_t *notes, int32_t count );
 
 #define OOT_GEO_MAX_TRIANGLES 2048
+/* Maximum number of live decoded texture slots. Scene reloads can recycle
+   slots; revision numbers tell a host when an index's pixels changed. */
+#define OOT_TEXTURE_MAX_COUNT 1024u
 
 /* Legacy atlas dimensions retained for source compatibility. The atlas output
    was never implemented; query individual textures with oot_get_texture. */
@@ -499,6 +502,10 @@ extern OOT_LIB_FN void oot_link_tick( int32_t linkId,
                                       const struct OoTLinkInputs *inputs,
                                       struct OoTLinkState *outState,
                                       struct OoTLinkGeometryBuffers *outBuffers );
+/* Number of otherwise valid triangles omitted by the most recent Link
+   geometry walk because OOT_GEO_MAX_TRIANGLES was reached. This includes
+   optional Navi/actor meshes appended to the same output. */
+extern OOT_LIB_FN uint32_t oot_link_get_geometry_dropped_triangles( void );
 extern OOT_LIB_FN void oot_link_delete( int32_t linkId );
 
 /* liboot vNEXT: move Link in place without the delete/recreate dance. Sets his
@@ -882,6 +889,10 @@ extern OOT_LIB_FN bool oot_scene_get_geometry( const float **position, const flo
                                                const float **color, const float **uv,
                                                const uint16_t **triTexture,
                                                uint32_t *numTriangles, uint32_t *xluStartTriangle );
+/* Number of otherwise valid triangles omitted by the most recent room-mesh
+   interpretation because OOT_SCENE_MAX_TRIANGLES was reached. Link rendering
+   does not change this value. */
+extern OOT_LIB_FN uint32_t oot_scene_get_geometry_dropped_triangles( void );
 
 /* liboot vNEXT: per-triangle render flags (enum OoTTriangleFlags), one byte per
    triangle, parallel to oot_scene_get_geometry's triTexture (same triangle

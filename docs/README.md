@@ -16,6 +16,11 @@ the [usage cookbook](USAGE.md) for focused examples or the
   model, and roadmap.
 - [Fidelity traces](FIDELITY.md): deterministic record/compare runs and the
   evidence required for a compatibility claim.
+- [ROM compatibility](ROM_COMPATIBILITY.md): tested revisions, evidence levels,
+  the local ROM identifier, and the process for adding a profile.
+- [Development](DEVELOPMENT.md): validation, source boundaries, ABI changes,
+  and vendored/generated files.
+- [Releasing](RELEASING.md): version, provenance, test, and packaging gates.
 
 ## Reference
 
@@ -27,6 +32,7 @@ the [usage cookbook](USAGE.md) for focused examples or the
   features not yet available through the engine API.
 - [Language bindings](../bindings/README.md): C++11 RAII and C# P/Invoke
   starters.
+- [Changelog](../CHANGELOG.md): user-visible changes by version.
 
 ## Which API?
 

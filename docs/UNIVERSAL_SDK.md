@@ -17,6 +17,7 @@ outputs, and handle every `OoTResult`.
 - Engine-owned Link geometry, actor snapshots, skeleton state, and Navi state.
 - Exact one-tick stepping plus a capped 20 Hz elapsed-time accumulator.
 - User-data-aware debug and SFX callbacks.
+- A versioned limits/capability query for dynamic hosts.
 - Static collision, water, ROM scenes, spawn points, targets, equipment,
   items, health, magic, texture views, and mapped gameplay-SFX/voice PCM views.
 - A C boundary usable from C++, C#, Rust, Python, and engine plugins.
@@ -148,6 +149,20 @@ under [`bindings/`](../bindings/).
 - Treat frame pointers as read-only and short-lived.
 - Translate `OoTResult`; never infer success from a non-null output alone.
 
+## Limits and truncation
+
+`oot_engine_get_limits` is process-independent and does not require an engine.
+Initialize `OoTEngineLimits` with `OOT_ENGINE_LIMITS_INIT`; its capability bits
+let dynamically loaded hosts distinguish available contracts without guessing
+from a library filename.
+
+The limits are capacities, not observed counts. When the combined Link, Navi,
+and optional actor stream exceeds its triangle capacity,
+`OoTEngineFrame.linkGeometryTruncated` is nonzero. For a loaded scene,
+`oot_engine_scene_get_dropped_triangles` returns the exact number of otherwise
+valid triangles omitted from its copied geometry. Existing actor-list
+truncation remains separately reported by `actorListTruncated`.
+
 ## Roadmap
 
 The next engine-API milestones are:
@@ -156,9 +171,11 @@ The next engine-API milestones are:
    Links can coexist safely.
 2. Add generated ROM profiles and a published compatibility matrix instead of
    relying on structural asset discovery alone.
-3. Replace fixed geometry limits with capacity queries and draw batches that
-   identify entity, material, render pass, blend mode, and depth mode. Alpha,
-   alpha-test, decal, and culling data are already exported.
+3. Replace the remaining fixed geometry storage with caller-selected
+   capacities and draw batches that identify entity, material, render pass,
+   blend mode, and depth mode. Published capacities and exact truncation
+   reporting now cover the current fixed buffers; alpha, alpha-test, decal,
+   and culling data are already exported.
 4. Add allocator, logger, filesystem, dynamic-collision, hit-volume, and host
    world-event interfaces.
 5. Improve the internal AudioSeq mixer's envelopes, filters, effects and

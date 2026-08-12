@@ -16,10 +16,18 @@
 
 namespace liboot {
 
+inline std::uint32_t api_version() noexcept {
+    return oot_engine_api_version();
+}
+
+inline const char *result_string(OoTResult result) noexcept {
+    return oot_engine_result_string(result);
+}
+
 class Error : public std::runtime_error {
 public:
     explicit Error(OoTResult result)
-        : std::runtime_error(oot_engine_result_string(result)), result_(result) {}
+        : std::runtime_error(result_string(result)), result_(result) {}
 
     OoTResult result() const noexcept { return result_; }
 
@@ -33,9 +41,28 @@ inline void check(OoTResult result) {
     }
 }
 
+inline OoTEngineConfig default_config() {
+    OoTEngineConfig config;
+    check(oot_engine_config_init_sized(&config,
+                                       static_cast<std::uint32_t>(sizeof(config)),
+                                       OOT_ENGINE_API_VERSION));
+    return config;
+}
+
+inline OoTEngineLimits limits() {
+    OoTEngineLimits value = OOT_ENGINE_LIMITS_INIT;
+    check(oot_engine_get_limits(&value));
+    return value;
+}
+
 struct AdvanceResult {
     std::uint32_t steps;
     const OoTEngineFrame *frame;
+};
+
+struct SceneSpawn {
+    std::array<float, 3> position;
+    std::int16_t yaw;
 };
 
 /*
@@ -46,8 +73,7 @@ struct AdvanceResult {
 class Engine {
 public:
     Engine(const std::uint8_t *rom, std::size_t romSize) {
-        OoTEngineConfig config;
-        check(oot_engine_config_init(&config));
+        OoTEngineConfig config = default_config();
         config.romData = rom;
         config.romSize = romSize;
         check(oot_engine_create(&config, &engine_));
@@ -90,6 +116,19 @@ public:
             engine_ = nullptr;
         }
         check(result);
+    }
+
+    /*
+     * Callbacks are borrowed. Their functions and user-data objects must stay
+     * alive until they are replaced, cleared, or this Engine is destroyed.
+     * A callback must not call back into this Engine.
+     */
+    void set_callbacks(OoTEngineDebugCallback debugCallback,
+                       void *debugUserData,
+                       OoTEngineSfxCallback sfxCallback,
+                       void *sfxUserData) {
+        check(oot_engine_set_callbacks(require_engine(), debugCallback,
+                                       debugUserData, sfxCallback, sfxUserData));
     }
 
     void create_link(float x, float y, float z) {
@@ -195,6 +234,29 @@ public:
         return runtime;
     }
 
+    /* Borrowed view; scene/world changes can invalidate its array pointers. */
+    const OoTEngineSceneGeometry &scene_geometry() const {
+        const OoTEngineSceneGeometry *geometry = nullptr;
+        check(oot_engine_scene_get_geometry(require_engine(), &geometry));
+        if (geometry == nullptr) {
+            throw Error(OOT_ENGINE_RESULT_NOT_AVAILABLE);
+        }
+        return *geometry;
+    }
+
+    std::uint32_t scene_dropped_triangles() const {
+        std::uint32_t count = 0u;
+        check(oot_engine_scene_get_dropped_triangles(require_engine(), &count));
+        return count;
+    }
+
+    SceneSpawn scene_spawn(std::int32_t spawnIndex) const {
+        SceneSpawn spawn{};
+        check(oot_engine_scene_get_spawn(require_engine(), spawnIndex,
+                                         spawn.position.data(), &spawn.yaw));
+        return spawn;
+    }
+
     const OoTEngineFrame &step(const OoTEngineInput *input = nullptr) {
         const OoTEngineFrame *frame = nullptr;
         check(oot_engine_step(require_engine(), input, &frame));
@@ -281,6 +343,23 @@ public:
         return value;
     }
 
+    /* Returned sample pointers are borrowed and live until Engine teardown. */
+    OoTEnginePcm voice_pcm(std::uint16_t sfxId) const {
+        OoTEnginePcm value{};
+        check(oot_engine_voice_get(require_engine(), sfxId, &value));
+        return value;
+    }
+
+    OoTEnginePcm ocarina_note_pcm(std::uint8_t noteIndex) const {
+        OoTEnginePcm value{};
+        check(oot_engine_ocarina_note_get(require_engine(), noteIndex, &value));
+        return value;
+    }
+
+    void set_enemy_bgm(bool enabled) {
+        check(oot_engine_set_enemy_bgm(require_engine(), enabled ? 1u : 0u));
+    }
+
 private:
     OoTEngine *require_engine() const {
         if (engine_ == nullptr) {
@@ -304,7 +383,9 @@ private:
 
 inline OoTEngineInput default_input() {
     OoTEngineInput input;
-    check(oot_engine_input_init(&input));
+    check(oot_engine_input_init_sized(&input,
+                                      static_cast<std::uint32_t>(sizeof(input)),
+                                      OOT_ENGINE_API_VERSION));
     return input;
 }
 

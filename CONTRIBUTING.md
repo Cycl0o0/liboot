@@ -6,12 +6,14 @@ Thank you for helping improve liboot.
 
 1. Do not commit ROMs, extracted game assets, audio captures, crash dumps, or
    other copyrighted/private runtime data.
-2. Build from a clean checkout with `make`.
-3. Run the ROM-backed checks locally with a legally obtained compatible ROM:
+2. Run the complete ROM-free gate with `make check`.
+3. For changes that affect runtime behavior, run the ROM-backed checks locally
+   with a legally obtained compatible ROM:
 
    ```sh
    make -C test playground
    ./test/playground /path/to/oot.z64 --suite 1000
+   # When an approved reference trace is available:
    ./test/fidelity_runner /path/to/oot.z64 --compare /path/to/reference.trace
    ```
 
@@ -27,6 +29,9 @@ Thank you for helping improve liboot.
    `liboot` comment. Update provenance documentation when vendored files move.
 6. Trace fixtures must contain numeric state/hashes only. Do not commit ROM
    data, decoded assets, geometry dumps, frame captures, or PCM samples.
+
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for source boundaries, ABI
+rules, generated/vendor workflows, and completion criteria.
 
 ## Licensing contributions
 

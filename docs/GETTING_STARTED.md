@@ -9,6 +9,8 @@ Godot, Unreal, Rust, Python, and custom-engine patterns, continue with
 ## Requirements
 
 - A C11 compiler and GNU Make, or CMake 3.16 or newer.
+- Python 3.8 or newer for `make check` and CMake builds with testing enabled
+  (the default). A library-only CMake build can use `-DBUILD_TESTING=OFF`.
 - Linux or macOS. CI builds shared and static libraries on Linux x86-64,
   Linux ARM64, and macOS. Windows is not currently supported.
 - A legally obtained, compatible Ocarina of Time ROM supplied at runtime.
@@ -51,20 +53,16 @@ can link `liboot::oot`; installed `pkg-config` consumers can use `liboot`.
 For a separate ASan/UBSan development build:
 
 ```sh
-cmake -S . -B build-sanitize \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DLIBOOT_ENABLE_SANITIZERS=ON
-cmake --build build-sanitize
-ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
-UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-  ctest --test-dir build-sanitize --output-on-failure
+make sanitizers
 ```
 
-`LIBOOT_SANITIZERS` defaults to `address,undefined`; override it with a
-comma-separated GCC/Clang sanitizer list when isolating one sanitizer. The
-runtime must be available to the selected compiler, either system-wide or
-through that compiler's configured library search path.
+This creates `build/sanitizers` and runs its complete ROM-free test suite.
+Leak detection is enabled on Linux and disabled for Apple's sanitizer runtime;
+ASan and UBSan remain active on both. `LIBOOT_SANITIZERS` defaults to
+`address,undefined`; override it with a comma-separated GCC/Clang sanitizer
+list when isolating one sanitizer. The runtime must be available to the
+selected compiler, either system-wide or through that compiler's configured
+library search path.
 
 ## Run the minimal host
 
@@ -154,6 +152,8 @@ renderer-neutral:
 - `triTexture[t]` selects a texture for triangle `t`, or `0xFFFF` for none;
 - the engine wrapper reports `numTriangles` and `triangleCapacity`; the raw
   buffer reports `numTrianglesUsed`, bounded by `OOT_GEO_MAX_TRIANGLES`.
+- `frame->linkGeometryTruncated` reports whether the combined Link/Navi/actor
+  stream omitted valid triangles at that cap.
 
 Call `oot_engine_texture_count`/`oot_engine_texture_get` after ticks (or the
 raw equivalents). Cache textures by index and upload again only when the

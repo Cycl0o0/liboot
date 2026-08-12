@@ -40,12 +40,15 @@ re-enter the engine.
 | `OOT_ENGINE_MAX_ACTOR_CAPACITY` | `4096` |
 | `OOT_ENGINE_MAX_STATIC_SURFACES` | `2730` |
 | `OOT_ENGINE_MAX_WATER_BOXES` | `65535` |
+| `OOT_ENGINE_MAX_TARGETS` | `16` |
+| `OOT_ENGINE_MAX_TEXTURES` | `1024` |
 | `OOT_ENGINE_MIN_ROM_SIZE` | `0x1060` |
 | `OOT_ENGINE_MAX_ROM_SIZE` | `256 * 1024 * 1024` |
 | `OOT_ENGINE_MAX_SUBSTEPS` | `1000` |
 | `OOT_ENGINE_MIN_FIXED_STEP_SECONDS` | `0.001f` |
 | `OOT_ENGINE_MAX_FIXED_STEP_SECONDS` | `1.0f` |
 | `OOT_ENGINE_INVALID_TARGET` | `0` |
+| `OOT_ENGINE_LIMITS_VERSION` | `1` |
 
 Opaque types and callbacks:
 
@@ -60,6 +63,25 @@ Native C/C++ callers should use the convenience initializers
 `oot_engine_config_init(&config)` and `oot_engine_input_init(&input)` (macros
 over the `_sized` functions). The static initializers `OOT_ENGINE_CONFIG_INIT`
 and `OOT_ENGINE_INPUT_INIT` are also provided.
+
+```c
+enum OoTEngineCapabilities {
+    OOT_ENGINE_CAPABILITY_STATIC_WORLD        = 1u << 0,
+    OOT_ENGINE_CAPABILITY_ROM_SCENE_LOADING   = 1u << 1,
+    OOT_ENGINE_CAPABILITY_LINK_GEOMETRY       = 1u << 2,
+    OOT_ENGINE_CAPABILITY_SCENE_GEOMETRY      = 1u << 3,
+    OOT_ENGINE_CAPABILITY_GEOMETRY_TRUNCATION = 1u << 4,
+    OOT_ENGINE_CAPABILITY_ACTOR_QUERY         = 1u << 5,
+    OOT_ENGINE_CAPABILITY_TARGETS             = 1u << 6,
+    OOT_ENGINE_CAPABILITY_TEXTURES            = 1u << 7,
+    OOT_ENGINE_CAPABILITY_FIXED_STEP          = 1u << 8,
+    OOT_ENGINE_CAPABILITY_AUDIO               = 1u << 9,
+    OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON   = 1u << 10
+};
+```
+
+The bit mask lets dynamic hosts test a contract directly instead of inferring
+features from a library filename.
 
 ## OoTResult
 
@@ -114,6 +136,32 @@ header; see [Low-level enums](#low-level-enums).
 
 Each struct begins with `structSize` for versioned FFI growth. Field comments
 below are from the header.
+
+### OoTEngineLimits
+
+```c
+typedef struct OoTEngineLimits {
+    uint32_t structSize;
+    uint32_t version;
+    uint64_t capabilityFlags;
+    uint32_t linkTriangleCapacity;
+    uint32_t sceneTriangleCapacity;
+    uint32_t staticSurfaceCapacity;
+    uint32_t waterBoxCapacity;
+    uint32_t maxActorCapacity;
+    uint32_t targetCapacity;
+    uint32_t textureCapacity;
+    uint32_t maxSubsteps;
+    float minFixedStepSeconds;
+    float maxFixedStepSeconds;
+    float defaultFixedStepSeconds;
+    uint32_t defaultMaxSubsteps;
+} OoTEngineLimits;            /* sizeof == 64 */
+```
+
+Initialize with `OOT_ENGINE_LIMITS_INIT`. The getter accepts the required
+prefix through `capabilityFlags`, preserves the caller's `structSize`, and
+never writes past it.
 
 ### OoTEngineConfig
 
@@ -237,7 +285,8 @@ typedef struct OoTEngineFrame {
     uint32_t actorCapacity;
     uint8_t actorListTruncated; /* more actors existed than actorCapacity */
     uint8_t skeletonAvailable;
-    uint8_t reserved[2];
+    uint8_t linkGeometryTruncated; /* valid triangles omitted at the cap */
+    uint8_t reserved0;
     struct OoTSkeletonPose skeleton;
     OoTEngineNaviState navi;
 } OoTEngineFrame;               /* sizeof == 544 on 64-bit */
@@ -296,6 +345,7 @@ typedef struct OoTEnginePcm {
 ```c
 uint32_t     oot_engine_api_version(void);
 const char  *oot_engine_result_string(OoTResult result);
+OoTResult    oot_engine_get_limits(OoTEngineLimits *outLimits);
 OoTResult    oot_engine_config_init_sized(OoTEngineConfig *config,
                                           uint32_t structSize, uint32_t apiVersion);
 OoTResult    oot_engine_input_init_sized(OoTEngineInput *input,
@@ -338,6 +388,8 @@ OoTResult oot_engine_scene_load(OoTEngine *engine, int32_t sceneIndex, int32_t r
                                 int32_t *outNativeResult);       /* roomIndex -1 = whole scene */
 OoTResult oot_engine_scene_get_geometry(OoTEngine *engine,
                                         const OoTEngineSceneGeometry **outGeometry);
+OoTResult oot_engine_scene_get_dropped_triangles(OoTEngine *engine,
+                                                  uint32_t *outDroppedTriangles);
 OoTResult oot_engine_scene_set_room(OoTEngine *engine, int32_t roomIndex,
                                     int32_t *outNativeResult);
 OoTResult oot_engine_scene_get_door_count(OoTEngine *engine, uint32_t *outCount);
@@ -424,6 +476,7 @@ wrapper does not surface.
 #define OOT_AUDIO_NATURE_COUNT   19
 #define OOT_AUDIO_NATURE_NONE    0x13
 #define OOT_GEO_MAX_TRIANGLES    2048   /* per-tick Link geometry cap */
+#define OOT_TEXTURE_MAX_COUNT    1024   /* decoded texture slots */
 #define OOT_SKELETON_MAX_JOINTS  21
 #define OOT_SCENE_MAX_TRIANGLES  16384  /* full multi-room dungeon cap */
 ```
@@ -584,6 +637,11 @@ struct OoTLinkGeometryBuffers {  /* caller-allocated, filled per tick */
 Allocate `position`/`normal`/`color`/`uv` for `OOT_GEO_MAX_TRIANGLES * 3`
 vertices (three floats each, two for `uv`).
 
+`oot_link_get_geometry_dropped_triangles()` returns the exact number of valid
+triangles omitted by the most recent Link/Navi/actor walk. The corresponding
+scene query is `oot_scene_get_geometry_dropped_triangles()`; the two counters
+are independent.
+
 ### Textures, skeleton, actors, doors
 
 ```c
@@ -686,6 +744,7 @@ bool    oot_scene_get_geometry(const float **position, const float **normal,
                                const float **color, const float **uv,
                                const uint16_t **triTexture,
                                uint32_t *numTriangles, uint32_t *xluStartTriangle);
+uint32_t oot_scene_get_geometry_dropped_triangles(void);
 bool    oot_scene_get_triangle_flags(const uint8_t **outFlags);
 bool    oot_scene_spawn(int32_t spawnIndex, float outPos[3], int16_t *outYaw);
 ```
@@ -701,6 +760,7 @@ int32_t oot_link_create(float x, float y, float z);   /* <0 on failure; load a w
 void    oot_link_delete(int32_t linkId);
 void    oot_link_tick(int32_t linkId, const struct OoTLinkInputs *inputs,
                       struct OoTLinkState *outState, struct OoTLinkGeometryBuffers *outBuffers);
+uint32_t oot_link_get_geometry_dropped_triangles(void);
 bool    oot_link_set_pose(int32_t linkId, float x, float y, float z, int16_t yaw);
 void    oot_link_freeze(int32_t linkId, bool frozen);
 void    oot_link_set_invincible(int32_t linkId, int8_t frames);

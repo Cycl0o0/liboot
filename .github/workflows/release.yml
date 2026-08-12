@@ -9,12 +9,70 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  validate:
+    name: Validate release gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang cmake mono-mcs
+
+      - name: Verify version, source, and binding contracts
+        shell: bash
+        run: |
+          tools/check-version.sh "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}"
+          tools/check-vendor.py
+          tools/check-bindings.py
+
+      - name: Run ROM-free gate
+        run: make check
+
+      - name: Verify public headers, bindings, and ABI
+        run: |
+          printf '%s\n' '#include <liboot_engine.h>' \
+            'int main(void) { OoTEngineInput input = OOT_ENGINE_INPUT_INIT; return input.structSize == 0u; }' \
+            | cc -x c -std=c11 -Wall -Wextra -Wpedantic -Werror \
+                -Idist/include -c -o "$RUNNER_TEMP/public-c.o" -
+          printf '%s\n' '#include <liboot.hpp>' \
+            'int main() { auto input = liboot::default_input(); return input.structSize == 0u; }' \
+            | c++ -x c++ -std=c++11 -Wall -Wextra -Wpedantic -Werror \
+                -Idist/include -c -o "$RUNNER_TEMP/public-cpp.o" -
+          mcs -unsafe -warnaserror -target:library \
+            -out:"$RUNNER_TEMP/LibOot.dll" bindings/csharp/LibOot.cs
+          mcs -unsafe -warnaserror -out:"$RUNNER_TEMP/csharp-init-test.exe" \
+            bindings/csharp/LibOot.cs test/csharp_init_test.cs
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/dist" \
+            mono "$RUNNER_TEMP/csharp-init-test.exe"
+          tools/check-symbols.sh dist/liboot.so
+
+      - name: Run finite parser fuzz smoke
+        run: make fuzz-smoke
+
+      - name: Run sanitizer suite
+        run: make sanitizers
+
   build:
     name: Package ${{ matrix.name }}
+    needs: validate
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # Linux (x86_64/arm64) and macOS (universal2) are the released targets.
     # Windows is not built yet (the vendored decomp needs an N64/ILP32 libc
     # porting pass); add a windows-x64 entry here once that lands.
@@ -28,29 +86,41 @@ jobs:
               extra: '-DCMAKE_OSX_ARCHITECTURES=x86_64\;arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' }
     env:
       INSTALL_PREFIX: ${{ github.workspace }}/stage
+      ARCHIVE_LABEL: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
 
-      # On a tag build, also require the tag to equal the pinned version.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      # On a tag build, require the tag's base to equal the pinned version.
       - name: Check version consistency
         shell: bash
         run: tools/check-version.sh "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}"
+
+      - name: Verify source and binding contracts
+        run: |
+          tools/check-vendor.py
+          tools/check-bindings.py
 
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes cmake ninja-build
+          sudo apt-get install --yes cmake ninja-build pkg-config
 
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install ninja
+        run: brew install ninja pkg-config
 
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
           -DBUILD_SHARED_LIBS=ON
+          -DBUILD_TESTING=ON
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_INSTALL_LIBDIR=lib
           -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX"
@@ -58,6 +128,9 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Run ROM-free tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
 
       - name: Install
         run: cmake --install build --config Release
@@ -75,10 +148,20 @@ jobs:
           esac
           tools/check-symbols.sh "$lib"
 
+      - name: Verify installed package consumers
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            LIBOOT_CHECK_ARCHES="x86_64 arm64" \
+              tools/check-install.sh "$INSTALL_PREFIX"
+          else
+            tools/check-install.sh "$INSTALL_PREFIX"
+          fi
+
       - name: Package archive + checksum
         shell: bash
         run: |
-          archive="liboot-${{ github.ref_name }}-${{ matrix.name }}.tar.gz"
+          archive="liboot-${ARCHIVE_LABEL}-${{ matrix.name }}.tar.gz"
           tar czf "$archive" -C "$INSTALL_PREFIX" .
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$archive" > "$archive.sha256"
@@ -86,6 +169,11 @@ jobs:
             shasum -a 256 "$archive" > "$archive.sha256"
           fi
           ls -l "$archive" "$archive.sha256"
+
+      - name: Attest package provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: 'liboot-*.tar.gz'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -99,6 +187,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4

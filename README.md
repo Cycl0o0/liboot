@@ -21,7 +21,9 @@ complete game, or renderer.
 
 You need a C11 compiler, GNU Make or CMake 3.16+, and a legally obtained
 compatible ROM (`.z64`, `.v64`, or `.n64`). Linux and macOS are tested in CI;
-the optional playground also needs SDL2 and OpenGL.
+the optional playground also needs SDL2 and OpenGL. ROM-free checks require
+Python 3.8+; pass `-DBUILD_TESTING=OFF` to CMake for a library-only build
+without Python.
 
 ```sh
 make
@@ -104,9 +106,20 @@ calls with an active `OoTEngine`.
 | Understand ABI and ownership decisions | [Engine API design](docs/UNIVERSAL_SDK.md) |
 | Record or compare deterministic runs | [Fidelity traces](docs/FIDELITY.md) |
 | Use the C++ or C# starters | [Language bindings](bindings/README.md) |
+| Check a ROM revision or add a profile | [ROM compatibility](docs/ROM_COMPATIBILITY.md) |
+| Work on the library or prepare a release | [Development](docs/DEVELOPMENT.md) and [releasing](docs/RELEASING.md) |
 
 The [documentation index](docs/README.md) separates guides from reference
 material.
+
+To identify a local ROM without uploading or rewriting it:
+
+```sh
+tools/identify-rom.py --json /path/to/oot.z64
+```
+
+The tool reports header metadata and a SHA-256 over canonical big-endian bytes,
+so equivalent `.z64`, `.v64`, and `.n64` dumps share one identity.
 
 ## How it works
 
@@ -130,15 +143,16 @@ source.
 
 ## Tests
 
-ROM-free checks run in public CI:
+The local gate matches the ROM-free checks used by CI and release builds:
 
 ```sh
-make -C test engine_init_test rom_util_test audio_overflow_test fidelity_runner
-./test/engine_init_test
-./test/rom_util_test
-./test/audio_overflow_test
-./test/fidelity_runner --self-test
+make check
+make sanitizers
+make fuzz-smoke
 ```
+
+The parser fuzz targets use generated or arbitrary bytes and are documented in
+[`fuzz/README.md`](fuzz/README.md).
 
 ROM-backed tests cover initialization, equipment, scenes, rendering, the audio
 catalog and sequencer, and longer headless runs. A fidelity trace can detect a

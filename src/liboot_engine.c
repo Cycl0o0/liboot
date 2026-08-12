@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define ENGINE_MAGIC 0x4F4F5445u /* "OOTE" */
-#define ENGINE_TARGET_SLOTS 16u
+#define ENGINE_TARGET_SLOTS OOT_ENGINE_MAX_TARGETS
 #define ENGINE_TARGET_INDEX_MASK 0xFFu
 #define ENGINE_KNOWN_RENDER_FLAGS \
     ((uint32_t)(OOT_ENGINE_RENDER_NAVI | OOT_ENGINE_RENDER_ACTORS))
@@ -66,6 +66,7 @@ struct OoTEngine
     uint8_t coreInitSucceeded;
     uint8_t coreInitFailed;
     uint8_t worldLoaded;
+    uint32_t sceneDroppedTriangles;
 
     OoTEngineDebugCallback debugCallback;
     void *debugUserData;
@@ -387,6 +388,8 @@ static OoTResult engine_tick_locked(OoTEngine *engine, const OoTEngineInput *inp
     link_state_copy(&engine->frame.link, &nativeState);
     engine->currentAge = nativeState.age;
     engine->frame.geometry.numTriangles = nativeGeometry.numTrianglesUsed;
+    engine->frame.linkGeometryTruncated =
+        oot_link_get_geometry_dropped_triangles() != 0u;
 
     actorCount = oot_actor_query(engine->actorStorage, (int32_t)actorQueryCapacity);
     if (actorCount < 0) {
@@ -430,6 +433,7 @@ static void scene_geometry_clear(OoTEngine *engine)
 {
     engine->sceneGeometry.numTriangles = 0u;
     engine->sceneGeometry.xluStartTriangle = 0u;
+    engine->sceneDroppedTriangles = 0u;
     engine->sceneGeometryValid = 0u;
 }
 
@@ -494,6 +498,7 @@ static OoTResult scene_geometry_copy(OoTEngine *engine)
     }
     engine->sceneGeometry.numTriangles = numTriangles;
     engine->sceneGeometry.xluStartTriangle = xluStart;
+    engine->sceneDroppedTriangles = oot_scene_get_geometry_dropped_triangles();
     engine->sceneGeometryValid = 1u;
     return OOT_ENGINE_RESULT_OK;
 }
@@ -501,6 +506,58 @@ static OoTResult scene_geometry_copy(OoTEngine *engine)
 uint32_t oot_engine_api_version(void)
 {
     return OOT_ENGINE_API_VERSION;
+}
+
+OoTResult oot_engine_get_limits(OoTEngineLimits *outLimits)
+{
+    static const uint64_t capabilities =
+        (uint64_t)OOT_ENGINE_CAPABILITY_STATIC_WORLD |
+        (uint64_t)OOT_ENGINE_CAPABILITY_ROM_SCENE_LOADING |
+        (uint64_t)OOT_ENGINE_CAPABILITY_LINK_GEOMETRY |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_GEOMETRY |
+        (uint64_t)OOT_ENGINE_CAPABILITY_GEOMETRY_TRUNCATION |
+        (uint64_t)OOT_ENGINE_CAPABILITY_ACTOR_QUERY |
+        (uint64_t)OOT_ENGINE_CAPABILITY_TARGETS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_TEXTURES |
+        (uint64_t)OOT_ENGINE_CAPABILITY_FIXED_STEP |
+        (uint64_t)OOT_ENGINE_CAPABILITY_AUDIO |
+        (uint64_t)OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON;
+    OoTEngineLimits limits;
+    uint32_t callerSize;
+    size_t copySize;
+
+    if (outLimits == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    callerSize = outLimits->structSize;
+    if ((size_t)callerSize < MEMBER_END(OoTEngineLimits, capabilityFlags)) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    if (outLimits->version != OOT_ENGINE_LIMITS_VERSION) {
+        return OOT_ENGINE_RESULT_API_VERSION;
+    }
+
+    memset(&limits, 0, sizeof(limits));
+    limits.structSize = callerSize;
+    limits.version = OOT_ENGINE_LIMITS_VERSION;
+    limits.capabilityFlags = capabilities;
+    limits.linkTriangleCapacity = OOT_GEO_MAX_TRIANGLES;
+    limits.sceneTriangleCapacity = OOT_SCENE_MAX_TRIANGLES;
+    limits.staticSurfaceCapacity = OOT_ENGINE_MAX_STATIC_SURFACES;
+    limits.waterBoxCapacity = OOT_ENGINE_MAX_WATER_BOXES;
+    limits.maxActorCapacity = OOT_ENGINE_MAX_ACTOR_CAPACITY;
+    limits.targetCapacity = OOT_ENGINE_MAX_TARGETS;
+    limits.textureCapacity = OOT_ENGINE_MAX_TEXTURES;
+    limits.maxSubsteps = OOT_ENGINE_MAX_SUBSTEPS;
+    limits.minFixedStepSeconds = OOT_ENGINE_MIN_FIXED_STEP_SECONDS;
+    limits.maxFixedStepSeconds = OOT_ENGINE_MAX_FIXED_STEP_SECONDS;
+    limits.defaultFixedStepSeconds = OOT_ENGINE_DEFAULT_FIXED_STEP;
+    limits.defaultMaxSubsteps = OOT_ENGINE_DEFAULT_MAX_SUBSTEPS;
+
+    copySize = (size_t)callerSize < sizeof(limits)
+                   ? (size_t)callerSize : sizeof(limits);
+    memcpy(outLimits, &limits, copySize);
+    return OOT_ENGINE_RESULT_OK;
 }
 
 const char *oot_engine_result_string(OoTResult result)
@@ -1338,6 +1395,27 @@ OoTResult oot_engine_scene_get_geometry(OoTEngine *engine,
         return OOT_ENGINE_RESULT_NOT_AVAILABLE;
     }
     *outGeometry = &engine->sceneGeometry;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_dropped_triangles(
+    OoTEngine *engine, uint32_t *outDroppedTriangles)
+{
+    OoTResult result;
+    if (outDroppedTriangles == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    *outDroppedTriangles = 0u;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!engine->sceneGeometryValid) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    *outDroppedTriangles = engine->sceneDroppedTriangles;
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
 }

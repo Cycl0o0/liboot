@@ -1,11 +1,12 @@
 # Language bindings
 
-The repository includes two starter bindings for the engine API in
-[`src/liboot_engine.h`](../src/liboot_engine.h). They cover the common lifecycle
-and integration path but do not yet mirror every exported function:
+The repository includes two bindings for the engine API in
+[`src/liboot_engine.h`](../src/liboot_engine.h). Both cover every exported
+`oot_engine_*` function; each also exposes a smaller, language-appropriate
+selection of the raw audio and ocarina helpers from `src/liboot.h`:
 
 - [`cpp/liboot.hpp`](cpp/liboot.hpp) — C++11 RAII ownership, exceptions for
-  `OoTResult`, and borrowed frame views.
+  `OoTResult`, and typed frame, scene, spawn, texture, and PCM views.
 - [`csharp/LibOot.cs`](csharp/LibOot.cs) — unsafe blittable layouts and P/Invoke
   declarations suitable for Unity or another .NET host. See the
   [C# binding guide](csharp/README.md) for a complete lifecycle example.
@@ -41,6 +42,17 @@ reported or retried. Destruction must happen outside a liboot callback; the
 noexcept RAII destructor terminates if native teardown fails rather than
 silently abandoning the process-wide singleton.
 
+`scene_geometry()` returns engine-owned arrays that can change on a scene or
+room load. `voice_pcm()` and `ocarina_note_pcm()` return small value records
+whose sample pointers remain owned by the engine. `set_callbacks()` does not
+own callback functions or user data; keep both alive until callbacks are
+cleared or the engine is destroyed, and never re-enter the engine from one.
+
+Use `liboot::limits()` before creating an engine to read the versioned capacity
+and capability record. `frame.linkGeometryTruncated` and
+`engine.scene_dropped_triangles()` distinguish a complete mesh from one capped
+by fixed storage.
+
 ## C# and Unity
 
 Compile with unsafe code enabled and place `liboot.so` (Linux) or
@@ -70,3 +82,16 @@ not allow exceptions to cross the native boundary.
 The integration examples in
 [`docs/ENGINE_INTEGRATION.md`](../docs/ENGINE_INTEGRATION.md) cover coordinate
 conversion, rendering, audio, collision, and engine-specific plugin layouts.
+
+## Parity check
+
+Run the dependency-free checker after changing the native engine header or a
+binding:
+
+```sh
+./tools/check-bindings.py
+```
+
+It compares native `oot_engine_*` declarations with C++ calls and C# P/Invoke
+entry points. It deliberately does not claim parity for the broader raw API in
+`src/liboot.h`.

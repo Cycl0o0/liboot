@@ -21,6 +21,12 @@ internal static class CSharpInitTest
                 (IntPtr.Size == 8 ? 72 : 48), "EngineConfig ABI size");
         Require(Marshal.SizeOf(typeof(EngineInput)) == 24,
                 "EngineInput ABI size");
+        Require(Marshal.SizeOf(typeof(EngineLimits)) == 64,
+                "EngineLimits ABI size");
+        Require(Marshal.OffsetOf(typeof(EngineLimits), "CapabilityFlags").ToInt32() == 8 &&
+                Marshal.OffsetOf(typeof(EngineLimits), "LinkTriangleCapacity").ToInt32() == 16 &&
+                Marshal.OffsetOf(typeof(EngineLimits), "DefaultMaxSubsteps").ToInt32() == 60,
+                "EngineLimits ABI offsets");
         Require(Marshal.SizeOf(typeof(EngineLinkState)) == 92,
                 "EngineLinkState ABI size");
         Require(Marshal.OffsetOf(typeof(EngineLinkState), "AnimationId").ToInt32() == 90,
@@ -42,11 +48,69 @@ internal static class CSharpInitTest
         Require(Marshal.OffsetOf(typeof(SceneRuntime), "ActiveRoomIndex").ToInt32() == 12 &&
                 Marshal.OffsetOf(typeof(SceneRuntime), "RoomType").ToInt32() == 26,
                 "SceneRuntime ABI offsets");
+        if (IntPtr.Size == 8)
+        {
+            Require(Marshal.SizeOf(typeof(EngineFrame)) == 544,
+                    "EngineFrame ABI size");
+            Require(Marshal.OffsetOf(typeof(EngineFrame), "LinkGeometryTruncated").ToInt32() == 210 &&
+                    Marshal.OffsetOf(typeof(EngineFrame), "Reserved0").ToInt32() == 211 &&
+                    Marshal.OffsetOf(typeof(EngineFrame), "Skeleton").ToInt32() == 212,
+                    "EngineFrame truncation ABI offsets");
+        }
         Require(Enum.GetUnderlyingType(typeof(Age)) == typeof(byte) &&
                 Enum.GetUnderlyingType(typeof(SfxAction)) == typeof(byte) &&
                 Enum.GetUnderlyingType(typeof(AudioPlayer)) == typeof(byte) &&
-                Enum.GetUnderlyingType(typeof(Scene)) == typeof(int),
+                Enum.GetUnderlyingType(typeof(Scene)) == typeof(int) &&
+                Enum.GetUnderlyingType(typeof(EngineCapabilities)) == typeof(ulong),
                 "enum ABI widths");
+
+        EngineCapabilities expectedCapabilities =
+            EngineCapabilities.StaticWorld |
+            EngineCapabilities.RomSceneLoading |
+            EngineCapabilities.LinkGeometry |
+            EngineCapabilities.SceneGeometry |
+            EngineCapabilities.GeometryTruncation |
+            EngineCapabilities.ActorQuery |
+            EngineCapabilities.Targets |
+            EngineCapabilities.Textures |
+            EngineCapabilities.FixedStep |
+            EngineCapabilities.Audio |
+            EngineCapabilities.ProcessSingleton;
+        EngineLimits badLimits = new EngineLimits();
+        badLimits.StructSize = (uint)Marshal.SizeOf(typeof(EngineLimits));
+        badLimits.Version = Native.EngineLimitsVersion + 1u;
+        badLimits.CapabilityFlags = (EngineCapabilities)ulong.MaxValue;
+        Require(Native.EngineGetLimits(ref badLimits) == Result.ApiVersion &&
+                badLimits.CapabilityFlags == (EngineCapabilities)ulong.MaxValue,
+                "mismatched limits query wrote output");
+
+        EngineLimits limits;
+        Require(Native.GetEngineLimits(out limits) == Result.Ok,
+                "limits query");
+        Require(limits.StructSize == (uint)Marshal.SizeOf(typeof(EngineLimits)) &&
+                limits.Version == Native.EngineLimitsVersion &&
+                limits.CapabilityFlags == expectedCapabilities,
+                "limits tags and capabilities");
+        Require(limits.LinkTriangleCapacity == 2048u &&
+                limits.SceneTriangleCapacity == 16384u &&
+                limits.StaticSurfaceCapacity == 2730u &&
+                limits.WaterBoxCapacity == 65535u &&
+                limits.MaxActorCapacity == 4096u &&
+                limits.TargetCapacity == 16u &&
+                limits.TextureCapacity == 1024u,
+                "limits capacities");
+        Require(limits.MaxSubsteps == 1000u &&
+                Math.Abs(limits.MinFixedStepSeconds - 0.001f) < 0.000001f &&
+                Math.Abs(limits.MaxFixedStepSeconds - 1.0f) < 0.000001f &&
+                Math.Abs(limits.DefaultFixedStepSeconds - 0.05f) < 0.000001f &&
+                limits.DefaultMaxSubsteps == 4u,
+                "limits time-step values");
+
+        uint droppedTriangles = 0xA5A5A5A5u;
+        Require(Native.EngineSceneGetDroppedTriangles(IntPtr.Zero,
+                    out droppedTriangles) == Result.InvalidArgument &&
+                droppedTriangles == 0u,
+                "scene truncation invalid-engine contract");
 
         SequenceInfo sequenceInfo;
         Require(!Native.AudioSequenceGetInfo(0, out sequenceInfo) &&

@@ -140,34 +140,93 @@ else()
 endif()
 
 if(BUILD_TESTING)
+    function(liboot_configure_test target)
+        set_target_properties(${target} PROPERTIES
+            C_STANDARD 11
+            C_STANDARD_REQUIRED YES
+            C_EXTENSIONS NO
+        )
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4)
+        else()
+            target_compile_options(${target} PRIVATE
+                -Wall -Wextra -Wpedantic
+            )
+        endif()
+        if(LIBOOT_ENABLE_SANITIZERS)
+            target_compile_options(${target} PRIVATE
+                ${liboot_sanitizer_flags}
+            )
+            target_link_options(${target} PRIVATE
+                ${liboot_sanitizer_flags}
+            )
+        endif()
+    endfunction()
+
     add_executable(liboot_fidelity_runner test/fidelity_runner.c)
-    set_target_properties(liboot_fidelity_runner PROPERTIES
-        C_STANDARD 11
-        C_STANDARD_REQUIRED YES
-        C_EXTENSIONS NO
-    )
+    liboot_configure_test(liboot_fidelity_runner)
     target_link_libraries(liboot_fidelity_runner PRIVATE liboot::oot)
     if(NOT WIN32)
         target_link_libraries(liboot_fidelity_runner PRIVATE m)
     endif()
-    if(MSVC)
-        target_compile_options(liboot_fidelity_runner PRIVATE /W4)
-    else()
-        target_compile_options(liboot_fidelity_runner PRIVATE
-            -Wall -Wextra -Wpedantic
-        )
-    endif()
-    if(LIBOOT_ENABLE_SANITIZERS)
-        target_compile_options(liboot_fidelity_runner PRIVATE
-            ${liboot_sanitizer_flags}
-        )
-        target_link_options(liboot_fidelity_runner PRIVATE
-            ${liboot_sanitizer_flags}
-        )
-    endif()
     add_test(
         NAME fidelity-runner-self-test
         COMMAND liboot_fidelity_runner --self-test
+    )
+
+    add_executable(liboot_engine_init_test test/engine_init_test.c)
+    liboot_configure_test(liboot_engine_init_test)
+    target_link_libraries(liboot_engine_init_test PRIVATE liboot::oot)
+    add_test(
+        NAME engine-init-contract
+        COMMAND liboot_engine_init_test
+    )
+
+    # rom_util.c is deliberately tested directly because it is an internal,
+    # hidden-symbol parser rather than part of the installed ABI.
+    add_executable(liboot_rom_util_test
+        test/rom_util_test.c
+        src/rom_util.c
+    )
+    liboot_configure_test(liboot_rom_util_test)
+    target_include_directories(liboot_rom_util_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME rom-util-synthetic-inputs
+        COMMAND liboot_rom_util_test
+    )
+
+    add_executable(liboot_audio_overflow_test test/audio_overflow_test.c)
+    liboot_configure_test(liboot_audio_overflow_test)
+    add_test(
+        NAME audio-overflow-arithmetic
+        COMMAND liboot_audio_overflow_test
+    )
+
+    add_executable(liboot_enemy_bgm_test test/enemy_bgm_test.c)
+    liboot_configure_test(liboot_enemy_bgm_test)
+    target_link_libraries(liboot_enemy_bgm_test PRIVATE liboot::oot)
+    add_test(
+        NAME enemy-bgm-contract
+        COMMAND liboot_enemy_bgm_test
+    )
+
+    add_executable(liboot_engine_limits_test test/engine_limits_test.c)
+    liboot_configure_test(liboot_engine_limits_test)
+    target_link_libraries(liboot_engine_limits_test PRIVATE liboot::oot)
+    add_test(
+        NAME engine-limits-contract
+        COMMAND liboot_engine_limits_test
+    )
+
+    find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+    add_test(
+        NAME rom-identity-synthetic-inputs
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/rom_identity_test.py"
+    )
+    set_tests_properties(rom-identity-synthetic-inputs PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
     )
 
     # Hidden decomp symbols are intentionally absent from the shared ABI. A
@@ -175,11 +234,7 @@ if(BUILD_TESTING)
     # to perform 0x80 << 24 as a signed shift.
     if(NOT BUILD_SHARED_LIBS)
         add_executable(liboot_collision_mask_test test/collision_mask_test.c)
-        set_target_properties(liboot_collision_mask_test PROPERTIES
-            C_STANDARD 11
-            C_STANDARD_REQUIRED YES
-            C_EXTENSIONS NO
-        )
+        liboot_configure_test(liboot_collision_mask_test)
         target_compile_definitions(liboot_collision_mask_test PRIVATE
             _LANGUAGE_C
         )
@@ -189,21 +244,6 @@ if(BUILD_TESTING)
         target_link_libraries(liboot_collision_mask_test PRIVATE liboot::oot)
         if(NOT WIN32)
             target_link_libraries(liboot_collision_mask_test PRIVATE m)
-        endif()
-        if(MSVC)
-            target_compile_options(liboot_collision_mask_test PRIVATE /W4)
-        else()
-            target_compile_options(liboot_collision_mask_test PRIVATE
-                -Wall -Wextra -Wpedantic
-            )
-        endif()
-        if(LIBOOT_ENABLE_SANITIZERS)
-            target_compile_options(liboot_collision_mask_test PRIVATE
-                ${liboot_sanitizer_flags}
-            )
-            target_link_options(liboot_collision_mask_test PRIVATE
-                ${liboot_sanitizer_flags}
-            )
         endif()
         add_test(
             NAME collision-mask-signed-shift-regression
@@ -241,9 +281,13 @@ install(
 
 install(
     FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/CONTRIBUTING.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/CONTRIBUTORS.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         "${CMAKE_CURRENT_SOURCE_DIR}/NOTICE.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/SECURITY.md"
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot"
 )
 
@@ -259,6 +303,9 @@ install(
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/UNIVERSAL_SDK.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/ENGINE_INTEGRATION.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/docs/FIDELITY.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/ROM_COMPATIBILITY.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/DEVELOPMENT.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/docs/RELEASING.md"
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot/docs"
 )
 install(
@@ -286,6 +333,20 @@ install(
         "${CMAKE_CURRENT_SOURCE_DIR}/examples/engine.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/examples/basic.c"
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot/examples"
+)
+install(
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/README.md"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot/fuzz"
+)
+install(
+    PROGRAMS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/check-install.sh"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/identify-rom.py"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot/tools"
+)
+install(
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/rom-profiles.json"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot/tools"
 )
 
 set(liboot_cmake_install_dir "${CMAKE_INSTALL_LIBDIR}/cmake/liboot")
