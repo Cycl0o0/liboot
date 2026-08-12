@@ -8,8 +8,32 @@ audio layouts match the compiled decompilation paths.
 
 | ROM revision | Accepted byte orders | Validation level | Status |
 | --- | --- | --- | --- |
-| PAL Europe Rev 1 (PAL 1.1) | `.z64`, `.v64`, `.n64` | Maintainer development and ROM-backed tests | Exercised; publish the exact SHA-256 before making a release compatibility claim |
+| PAL Europe Rev 1 (PAL 1.1) | `.z64`, `.v64`, `.n64` | Levels 1–5: identification, initialization, Player, scenes, and audio | Profiled and exercised on 2026-08-12; retail fidelity is pending |
 | Any other retail revision | Parser may accept it | None published | Unsupported until profiled and tested |
+
+## PAL 1.1 evidence
+
+The `oot-pal-1.1` profile records a 33,554,432-byte canonical ROM with SHA-256
+`74f9266fd7fa23cc700b5b46a21fbe99cdc6ea10438bc4b48eeb625763b8611c`.
+Its header identifies `THE LEGEND OF ZELDA`, game code `NZLP`, Europe region
+code `P`, and revision byte `1`.
+
+The 2026-08-12 maintainer run covered:
+
+- engine initialization, both Link ages, equipment combinations, asset and
+  texture extraction, and the checked engine API;
+- the 18 scene presets exposed by the playground, including aggregate-room
+  geometry and a separate 1,000-frame scene walk;
+- an audio catalog containing 110 sequences, successful prewarming of all 110,
+  selected sequencer behavior checks, and all 64 Link voice IDs exercised by
+  `voicetest`;
+- 1,000-tick broad and feature runs plus a 1,000-frame combat run; and
+- a 1,000-tick local trace round-trip matching 58,000 fields.
+
+The local trace is regression evidence only. Retail fidelity remains unclaimed
+until the same scenario passes against a trace exported by the pinned OoT
+reference runtime. This run also does not cover every retail scene, alternate
+header, spawn, or room combination.
 
 Gameplay code is compiled with the NTSC 1.2 decompilation configuration even
 when compatible assets are read from PAL 1.1. A successful engine creation only
@@ -48,8 +72,9 @@ while still selecting different behavior or table layouts.
 4. Run the ROM-backed suite and capture which subsystems and scenes passed.
 5. Add a profile only after a maintainer has reproduced the result.
 
-Until the first exact hash is published, downstream applications should ask the
-user for a ROM and report unsupported input without claiming revision coverage.
+Downstream applications should ask the user for a ROM and match it locally
+against the profile database. They must not bundle ROM data or claim support
+for unprofiled revisions.
 
-The versioned profile database is `tools/rom-profiles.json`. It is intentionally
-empty until a maintainer can publish and reproduce an exact hash.
+The versioned profile database is `tools/rom-profiles.json`. Entries contain
+identity metadata only; they do not contain ROM bytes or extracted assets.

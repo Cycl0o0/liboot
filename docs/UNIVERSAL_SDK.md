@@ -169,8 +169,8 @@ The next engine-API milestones are:
 
 1. Move every decomp/shim global behind a true context so multiple engines and
    Links can coexist safely.
-2. Add generated ROM profiles and a published compatibility matrix instead of
-   relying on structural asset discovery alone.
+2. Expand exact ROM profiles beyond PAL 1.1 and automate maintainer-side
+   ROM-backed evidence without placing copyrighted data in public CI.
 3. Replace the remaining fixed geometry storage with caller-selected
    capacities and draw batches that identify entity, material, render pass,
    blend mode, and depth mode. Published capacities and exact truncation

@@ -1,4 +1,11 @@
 {
   "schema_version": 1,
-  "profiles": []
+  "profiles": [
+    {
+      "id": "oot-pal-1.1",
+      "label": "The Legend of Zelda: Ocarina of Time (PAL 1.1)",
+      "canonical_sha256": "74f9266fd7fa23cc700b5b46a21fbe99cdc6ea10438bc4b48eeb625763b8611c",
+      "size_bytes": 33554432
+    }
+  ]
 }
