@@ -73,9 +73,7 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    # Linux (x86_64/arm64) and macOS (universal2) are the released targets.
-    # Windows is not built yet (the vendored decomp needs an N64/ILP32 libc
-    # porting pass); add a windows-x64 entry here once that lands.
+    # Unix packages; Windows is built and tested in the dedicated job below.
     strategy:
       fail-fast: false
       matrix:
@@ -182,9 +180,95 @@ jobs:
           path: liboot-*.tar.gz*
           if-no-files-found: error
 
+  build-windows:
+    name: Package windows-x64
+    needs: validate
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      INSTALL_SUBDIR: stage
+      ARCHIVE_LABEL: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: zip
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            python:p
+            pkgconf:p
+
+      - name: Verify source contracts
+        shell: msys2 {0}
+        run: |
+          tools/check-version.sh "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}"
+          python tools/check-vendor.py
+          python tools/check-bindings.py
+
+      - name: Configure, build, and test
+        shell: msys2 {0}
+        run: |
+          install_prefix="$PWD/$INSTALL_SUBDIR"
+          cmake -S . -B build -G Ninja \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_BINDIR=bin \
+            -DCMAKE_INSTALL_PREFIX="$install_prefix"
+          cmake --build build --config Release --parallel
+          ctest --test-dir build --build-config Release --output-on-failure
+          cmake --install build --config Release
+
+      - name: Verify package
+        shell: msys2 {0}
+        run: |
+          install_prefix="$PWD/$INSTALL_SUBDIR"
+          export PATH="$install_prefix/bin:$PATH"
+          dll="$install_prefix/bin/liboot.dll"
+          RUNNER_OS=Windows tools/check-symbols.sh "$dll"
+          if objdump -p "$dll" | grep -Eiq \
+              'DLL Name:.*(libgcc_s|libwinpthread|libstdc\+\+)'; then
+            echo "liboot.dll imports an unpackaged MinGW runtime DLL" >&2
+            exit 1
+          fi
+          tools/check-install.sh "$install_prefix"
+
+      - name: Package archive and checksum
+        shell: msys2 {0}
+        run: |
+          repository="$PWD"
+          install_prefix="$repository/$INSTALL_SUBDIR"
+          archive="liboot-${ARCHIVE_LABEL}-windows-x64.zip"
+          (cd "$install_prefix" && zip -qr "$repository/$archive" .)
+          sha256sum "$archive" > "$archive.sha256"
+          ls -l "$archive" "$archive.sha256"
+
+      - name: Attest package provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: 'liboot-*.zip'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: liboot-*.zip*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -199,7 +283,11 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          files: dist-artifacts/liboot-*.tar.gz*
+          files: |
+            dist-artifacts/liboot-*.tar.gz
+            dist-artifacts/liboot-*.tar.gz.sha256
+            dist-artifacts/liboot-*.zip
+            dist-artifacts/liboot-*.zip.sha256
           generate_release_notes: true
           # A tag containing a hyphen (e.g. v0.9.0-rc1) is a pre-release.
           prerelease: ${{ contains(github.ref_name, '-') }}

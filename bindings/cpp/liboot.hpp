@@ -65,10 +65,31 @@ struct SceneSpawn {
     std::int16_t yaw;
 };
 
+struct SceneLayerSelection {
+    OoTSceneLayer layer;
+    bool used_fallback;
+};
+
+namespace audio {
+enum class Player : std::uint8_t {
+    Main = OOT_AUDIO_PLAYER_MAIN,
+    Fanfare = OOT_AUDIO_PLAYER_FANFARE,
+    Sfx = OOT_AUDIO_PLAYER_SFX,
+    Sub = OOT_AUDIO_PLAYER_SUB,
+};
+} // namespace audio
+
+struct EnemyBgmState {
+    bool enabled;
+    bool active;
+    float distance;
+};
+
 /*
- * Exclusive RAII owner for the engine-neutral API. The native core currently
- * allows only one Engine in a process. Frame pointers are borrowed and become
- * stale after the next mutating call.
+ * Exclusive RAII owner for one engine-neutral API instance. Shared-library
+ * builds isolate native writable state and support multiple Engine objects;
+ * static archives expose PROCESS_SINGLETON instead. Frame pointers are
+ * borrowed and become stale after the next mutating call on their Engine.
  */
 class Engine {
 public:
@@ -234,6 +255,71 @@ public:
         return runtime;
     }
 
+    SceneLayerSelection active_scene_layer() const {
+        std::uint8_t layer = OOT_SCENE_LAYER_CHILD_DAY;
+        std::uint8_t fallback = 0u;
+        check(oot_engine_scene_get_active_layer(require_engine(), &layer,
+                                                &fallback));
+        return {static_cast<OoTSceneLayer>(layer), fallback != 0u};
+    }
+
+    std::uint32_t scene_exit_count() const {
+        std::uint32_t count = 0u;
+        check(oot_engine_scene_get_exit_count(require_engine(), &count));
+        return count;
+    }
+
+    std::int16_t scene_exit(std::uint32_t index) const {
+        std::int16_t entrance = -1;
+        check(oot_engine_scene_get_exit(require_engine(), index, &entrance));
+        return entrance;
+    }
+
+    bool poll_world_event(OoTWorldEvent &event) {
+        event = {};
+        event.structSize = sizeof(event);
+        event.version = OOT_WORLD_EVENT_VERSION;
+        const OoTResult result =
+            oot_engine_world_event_poll(require_engine(), &event);
+        if (result == OOT_ENGINE_RESULT_NOT_AVAILABLE) {
+            return false;
+        }
+        check(result);
+        return true;
+    }
+
+    std::uint32_t scene_background_count() {
+        std::uint32_t count = 0u;
+        check(oot_engine_scene_get_background_count(require_engine(), &count));
+        return count;
+    }
+
+    OoTSceneBackground scene_background(std::uint32_t index) {
+        OoTSceneBackground background{};
+        background.structSize = sizeof(background);
+        background.version = OOT_SCENE_BACKGROUND_VERSION;
+        check(oot_engine_scene_get_background(require_engine(), index,
+                                               &background));
+        return background;
+    }
+
+    OoTSceneMaterialState scene_material_state() {
+        OoTSceneMaterialState state{};
+        state.structSize = sizeof(state);
+        state.version = OOT_SCENE_MATERIAL_STATE_VERSION;
+        check(oot_engine_scene_get_material_state(require_engine(), &state));
+        return state;
+    }
+
+    OoTSceneMaterialReference scene_material_reference(std::uint32_t index) {
+        OoTSceneMaterialReference reference{};
+        reference.structSize = sizeof(reference);
+        reference.version = OOT_SCENE_MATERIAL_REFERENCE_VERSION;
+        check(oot_engine_scene_get_material_reference(require_engine(), index,
+                                                      &reference));
+        return reference;
+    }
+
     /* Borrowed view; scene/world changes can invalidate its array pointers. */
     const OoTEngineSceneGeometry &scene_geometry() const {
         const OoTEngineSceneGeometry *geometry = nullptr;
@@ -255,6 +341,20 @@ public:
         check(oot_engine_scene_get_spawn(require_engine(), spawnIndex,
                                          spawn.position.data(), &spawn.yaw));
         return spawn;
+    }
+
+    std::uint32_t scene_actor_count() const {
+        std::uint32_t count = 0u;
+        check(oot_engine_scene_get_actor_count(require_engine(), &count));
+        return count;
+    }
+
+    OoTSceneActorEntry scene_actor(std::uint32_t index) const {
+        OoTSceneActorEntry actor{};
+        actor.structSize = sizeof(actor);
+        actor.version = OOT_SCENE_ACTOR_ENTRY_VERSION;
+        check(oot_engine_scene_get_actor(require_engine(), index, &actor));
+        return actor;
     }
 
     const OoTEngineFrame &step(const OoTEngineInput *input = nullptr) {
@@ -305,10 +405,59 @@ public:
                                            waterBoxCount));
     }
 
+    OoTDynamicCollision create_dynamic_collision(
+        const OoTSurface *surfaces, std::uint32_t surfaceCount,
+        const OoTDynamicCollisionTransform &transform,
+        std::uint32_t flags = OOT_DYNAMIC_COLLISION_CARRY_POSITION |
+                              OOT_DYNAMIC_COLLISION_CARRY_ROTATION_Y) {
+        OoTDynamicCollision handle = OOT_DYNAMIC_COLLISION_INVALID;
+        check(oot_engine_dynamic_collision_create(require_engine(), surfaces,
+                                                   surfaceCount, &transform,
+                                                   flags, &handle));
+        return handle;
+    }
+
+    void set_dynamic_collision_transform(
+        OoTDynamicCollision handle,
+        const OoTDynamicCollisionTransform &transform) {
+        check(oot_engine_dynamic_collision_set_transform(require_engine(), handle,
+                                                          &transform));
+    }
+
+    void set_dynamic_collision_enabled(OoTDynamicCollision handle, bool enabled) {
+        check(oot_engine_dynamic_collision_set_enabled(require_engine(), handle,
+                                                        enabled ? 1u : 0u));
+    }
+
+    OoTDynamicCollisionState dynamic_collision_state(
+        OoTDynamicCollision handle) const {
+        OoTDynamicCollisionState state{};
+        state.structSize = static_cast<std::uint32_t>(sizeof(state));
+        check(oot_engine_dynamic_collision_get_state(require_engine(), handle,
+                                                      &state));
+        return state;
+    }
+
+    void delete_dynamic_collision(OoTDynamicCollision handle) {
+        check(oot_engine_dynamic_collision_delete(require_engine(), handle));
+    }
+
     void load_scene(std::int32_t scene, std::int32_t room = 0) {
         std::int32_t nativeResult = 0;
         check(oot_engine_scene_load(require_engine(), scene, room,
                                     &nativeResult));
+    }
+
+    void load_scene(std::int32_t scene, std::int32_t room,
+                    OoTSceneLayer layer) {
+        OoTSceneLoadOptions options{};
+        options.structSize = sizeof(options);
+        options.sceneIndex = scene;
+        options.roomIndex = room;
+        options.layer = static_cast<std::uint8_t>(layer);
+        std::int32_t nativeResult = 0;
+        check(oot_engine_scene_load_ex(require_engine(), &options,
+                                       &nativeResult));
     }
 
     OoTEngineTarget create_target(float x, float y, float z,
@@ -329,6 +478,46 @@ public:
 
     void clear_targets() {
         check(oot_engine_targets_clear(require_engine()));
+    }
+
+    OoTEngineHostActor create_host_actor(const OoTHostActorState &state) {
+        OoTEngineHostActor actor = OOT_ENGINE_INVALID_HOST_ACTOR;
+        check(oot_engine_host_actor_create(require_engine(), &state, &actor));
+        return actor;
+    }
+
+    void update_host_actor(OoTEngineHostActor actor,
+                           const OoTHostActorState &state) {
+        check(oot_engine_host_actor_update(require_engine(), actor, &state));
+    }
+
+    OoTHostActorState host_actor(OoTEngineHostActor actor) const {
+        OoTHostActorState state{};
+        state.structSize = sizeof(state);
+        state.version = OOT_HOST_ACTOR_STATE_VERSION;
+        check(oot_engine_host_actor_get(require_engine(), actor, &state));
+        return state;
+    }
+
+    void remove_host_actor(OoTEngineHostActor actor) {
+        check(oot_engine_host_actor_remove(require_engine(), actor));
+    }
+
+    void clear_host_actors() {
+        check(oot_engine_host_actors_clear(require_engine()));
+    }
+
+    bool poll_host_actor_contact(OoTEngineActorContact &contact) {
+        contact = {};
+        contact.structSize = sizeof(contact);
+        contact.version = OOT_HOST_ACTOR_CONTACT_VERSION;
+        OoTResult result = oot_engine_host_actor_poll_contact(require_engine(),
+                                                               &contact);
+        if (result == OOT_ENGINE_RESULT_NOT_AVAILABLE) {
+            return false;
+        }
+        check(result);
+        return true;
     }
 
     std::uint32_t texture_count() const {
@@ -354,6 +543,111 @@ public:
         OoTEnginePcm value{};
         check(oot_engine_ocarina_note_get(require_engine(), noteIndex, &value));
         return value;
+    }
+
+    void audio_sequence_prewarm(std::uint16_t sequenceId) {
+        check(oot_engine_audio_sequence_prewarm(require_engine(), sequenceId));
+    }
+
+    void audio_sequence_play(audio::Player player, std::uint16_t sequenceId,
+                             std::uint16_t fadeInMs = 0u) {
+        check(oot_engine_audio_sequence_play(
+            require_engine(), static_cast<std::uint8_t>(player), sequenceId,
+            fadeInMs));
+    }
+
+    void audio_nature_play(audio::Player player, std::uint8_t ambienceId,
+                           std::uint16_t fadeInMs = 0u) {
+        check(oot_engine_audio_nature_play(
+            require_engine(), static_cast<std::uint8_t>(player), ambienceId,
+            fadeInMs));
+    }
+
+    void audio_sequence_stop(audio::Player player,
+                             std::uint16_t fadeOutMs = 0u) {
+        check(oot_engine_audio_sequence_stop(
+            require_engine(), static_cast<std::uint8_t>(player), fadeOutMs));
+    }
+
+    void audio_sequence_pause(audio::Player player, bool paused) {
+        check(oot_engine_audio_sequence_pause(
+            require_engine(), static_cast<std::uint8_t>(player),
+            paused ? 1u : 0u));
+    }
+
+    void audio_sequence_set_volume(audio::Player player, float volume) {
+        check(oot_engine_audio_sequence_set_volume(
+            require_engine(), static_cast<std::uint8_t>(player), volume));
+    }
+
+    void audio_sequence_set_io(audio::Player player, std::uint8_t port,
+                               std::int8_t value) {
+        check(oot_engine_audio_sequence_set_io(
+            require_engine(), static_cast<std::uint8_t>(player), port, value));
+    }
+
+    void audio_channel_set_io(audio::Player player, std::uint8_t channel,
+                              std::uint8_t port, std::int8_t value) {
+        check(oot_engine_audio_channel_set_io(
+            require_engine(), static_cast<std::uint8_t>(player), channel, port,
+            value));
+    }
+
+    OoTAudioState audio_sequence_state(audio::Player player) const {
+        OoTAudioState state{};
+        state.structSize = sizeof(state);
+        state.version = OOT_AUDIO_STATE_VERSION;
+        check(oot_engine_audio_sequence_get_state(
+            require_engine(), static_cast<std::uint8_t>(player), &state));
+        return state;
+    }
+
+    void audio_set_master_volume(float volume) {
+        check(oot_engine_audio_set_master_volume(require_engine(), volume));
+    }
+
+    void audio_stop_all(std::uint16_t fadeOutMs = 0u) {
+        check(oot_engine_audio_stop_all(require_engine(), fadeOutMs));
+    }
+
+    std::uint32_t audio_render_f32(float *interleavedStereo,
+                                   std::uint32_t frames,
+                                   std::uint32_t sampleRate) {
+        std::uint32_t rendered = 0u;
+        check(oot_engine_audio_render_f32(require_engine(), interleavedStereo,
+                                          frames, sampleRate, &rendered));
+        return rendered;
+    }
+
+    std::uint32_t audio_render_s16(std::int16_t *interleavedStereo,
+                                   std::uint32_t frames,
+                                   std::uint32_t sampleRate) {
+        std::uint32_t rendered = 0u;
+        check(oot_engine_audio_render_s16(require_engine(), interleavedStereo,
+                                          frames, sampleRate, &rendered));
+        return rendered;
+    }
+
+    void audio_sfx_play(std::uint16_t sfxId, float pan = 0.0f,
+                        float volume = 1.0f) {
+        check(oot_engine_audio_sfx_play(require_engine(), sfxId, pan, volume));
+    }
+
+    void audio_sfx_stop(std::uint16_t sfxId) {
+        check(oot_engine_audio_sfx_stop(require_engine(), sfxId));
+    }
+
+    void audio_sfx_stop_all() {
+        check(oot_engine_audio_sfx_stop_all(require_engine()));
+    }
+
+    EnemyBgmState enemy_bgm() const {
+        std::uint8_t enabled = 0u;
+        std::uint8_t active = 0u;
+        float distance = 0.0f;
+        check(oot_engine_get_enemy_bgm(require_engine(), &enabled, &active,
+                                       &distance));
+        return {enabled != 0u, active != 0u, distance};
     }
 
     void set_enemy_bgm(bool enabled) {
@@ -390,18 +684,12 @@ inline OoTEngineInput default_input() {
 }
 
 /*
- * ROM-backed Zelda AudioSeq playback. Audio state is process-global and is
- * initialized and torn down with Engine, so keep an Engine alive while using
- * these helpers. Serialize control calls against the host audio callback.
+ * Immutable audio constants and raw ROM-catalog views. A live Engine must have
+ * initialized the catalog, and these raw queries have no handle with which to
+ * select among different engine contexts. Mutable playback, cache, mixer, SFX,
+ * and state operations are therefore exposed only as guarded Engine methods.
  */
 namespace audio {
-
-enum class Player : std::uint8_t {
-    Main = OOT_AUDIO_PLAYER_MAIN,
-    Fanfare = OOT_AUDIO_PLAYER_FANFARE,
-    Sfx = OOT_AUDIO_PLAYER_SFX,
-    Sub = OOT_AUDIO_PLAYER_SUB,
-};
 
 constexpr std::uint16_t SequenceCount = OOT_AUDIO_SEQUENCE_COUNT;
 constexpr std::uint16_t NoMusic = OOT_AUDIO_NO_MUSIC;
@@ -429,65 +717,6 @@ inline bool sequence_info(std::uint16_t sequenceId,
     return oot_audio_sequence_get_info(sequenceId, &info);
 }
 
-inline bool sequence_prewarm(std::uint16_t sequenceId) noexcept {
-    return oot_audio_sequence_prewarm(sequenceId);
-}
-
-inline bool sequence_play(Player player, std::uint16_t sequenceId,
-                          std::uint16_t fadeInMs = 0u) noexcept {
-    return oot_audio_sequence_play(native_player(player), sequenceId,
-                                   fadeInMs);
-}
-
-inline bool nature_play(Player player, std::uint8_t ambienceId,
-                        std::uint16_t fadeInMs = 0u) noexcept {
-    return oot_audio_nature_play(native_player(player), ambienceId, fadeInMs);
-}
-
-inline void sequence_stop(Player player,
-                          std::uint16_t fadeOutMs = 0u) noexcept {
-    oot_audio_sequence_stop(native_player(player), fadeOutMs);
-}
-
-inline void sequence_pause(Player player, bool paused) noexcept {
-    oot_audio_sequence_pause(native_player(player), paused);
-}
-
-inline void sequence_set_volume(Player player, float volume) noexcept {
-    oot_audio_sequence_set_volume(native_player(player), volume);
-}
-
-inline void sequence_set_io(Player player, std::uint8_t port,
-                            std::int8_t value) noexcept {
-    oot_audio_sequence_set_io(native_player(player), port, value);
-}
-
-inline void channel_set_io(Player player, std::uint8_t channel,
-                           std::uint8_t port, std::int8_t value) noexcept {
-    oot_audio_channel_set_io(native_player(player), channel, port, value);
-}
-
-inline bool sequence_state(Player player, OoTAudioState &state) noexcept {
-    state = OoTAudioState{};
-    state.structSize = sizeof(state);
-    state.version = OOT_AUDIO_STATE_VERSION;
-    return oot_audio_sequence_get_state(native_player(player), &state);
-}
-
-inline void set_master_volume(float volume) noexcept {
-    oot_audio_set_master_volume(volume);
-}
-
-inline void stop_all(std::uint16_t fadeOutMs = 0u) noexcept {
-    oot_audio_stop_all(fadeOutMs);
-}
-
-inline std::uint32_t render_f32(float *interleavedStereo,
-                                std::uint32_t frames,
-                                std::uint32_t sampleRate) noexcept {
-    return oot_audio_render_f32(interleavedStereo, frames, sampleRate);
-}
-
 inline std::int32_t sfx_catalog_count() noexcept {
     return oot_audio_sfx_catalog_count();
 }
@@ -497,19 +726,6 @@ inline bool sfx_info(std::int32_t catalogIndex, OoTSfxInfo &info) noexcept {
     info.structSize = sizeof(info);
     info.version = OOT_SFX_INFO_VERSION;
     return oot_audio_sfx_catalog_get(catalogIndex, &info);
-}
-
-inline bool sfx_play(std::uint16_t sfxId, float pan = 0.0f,
-                     float volume = 1.0f) noexcept {
-    return oot_audio_sfx_play(sfxId, pan, volume);
-}
-
-inline void sfx_stop(std::uint16_t sfxId) noexcept {
-    oot_audio_sfx_stop(sfxId);
-}
-
-inline void sfx_stop_all() noexcept {
-    oot_audio_sfx_stop_all();
 }
 
 } // namespace audio

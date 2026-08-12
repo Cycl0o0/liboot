@@ -9,22 +9,26 @@
 
 #include "liboot_engine.h"
 
-_Static_assert(sizeof(OoTEngineLimits) == 64, "limits ABI size");
+_Static_assert(sizeof(OoTEngineLimits) == 72, "limits ABI size");
 _Static_assert(offsetof(OoTEngineLimits, capabilityFlags) == 8,
                "limits capability ABI offset");
 
 #if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
-_Static_assert(sizeof(struct OoTLinkGeometryBuffers) == 64,
+_Static_assert(sizeof(struct OoTLinkGeometryBuffers) == 88,
                "raw geometry ABI size changed");
-_Static_assert(sizeof(OoTEngineSceneGeometry) == 80,
+_Static_assert(sizeof(struct OoTGeometryBatch) == 96,
+               "geometry batch ABI size changed");
+_Static_assert(sizeof(OoTEngineSceneGeometry) == 96,
                "scene geometry ABI size changed");
 _Static_assert(offsetof(OoTEngineSceneGeometry, alpha) == 64,
                "scene alpha ABI offset changed");
-_Static_assert(sizeof(OoTEngineFrame) == 544, "frame ABI size changed");
+_Static_assert(sizeof(OoTEngineFrame) == 560, "frame ABI size changed");
 _Static_assert(offsetof(OoTEngineFrame, linkGeometryTruncated) == 210,
                "frame truncation flag must use reserved storage");
 _Static_assert(offsetof(OoTEngineFrame, skeleton) == 212,
                "frame skeleton ABI offset changed");
+_Static_assert(offsetof(OoTEngineFrame, geometryBatches) == 544,
+               "frame geometry batch ABI offset changed");
 #endif
 
 static int expect(const char *label, int condition)
@@ -49,7 +53,19 @@ int main(void)
         (uint64_t)OOT_ENGINE_CAPABILITY_TEXTURES |
         (uint64_t)OOT_ENGINE_CAPABILITY_FIXED_STEP |
         (uint64_t)OOT_ENGINE_CAPABILITY_AUDIO |
+        (uint64_t)OOT_ENGINE_CAPABILITY_DYNAMIC_COLLISION |
+        (uint64_t)OOT_ENGINE_CAPABILITY_GEOMETRY_BATCHES |
+        (uint64_t)OOT_ENGINE_CAPABILITY_HOST_ACTORS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_ACTOR_CATALOG |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_LAYERS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_TRANSITIONS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_BACKGROUNDS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_MATERIAL_METADATA |
+#if defined(LIBOOT_EXPECT_MULTI_INSTANCE)
+        (uint64_t)OOT_ENGINE_CAPABILITY_MULTI_INSTANCE;
+#else
         (uint64_t)OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON;
+#endif
     struct {
         OoTEngineLimits limits;
         unsigned char extension[16];
@@ -116,7 +132,9 @@ int main(void)
                  limits.capabilityFlags == expectedCapabilities);
     ok &= expect("geometry limits",
                  limits.linkTriangleCapacity == OOT_GEO_MAX_TRIANGLES &&
-                 limits.sceneTriangleCapacity == OOT_SCENE_MAX_TRIANGLES);
+                 limits.sceneTriangleCapacity == OOT_SCENE_MAX_TRIANGLES &&
+                 limits.maxLinkTriangleCapacity == OOT_GEO_MAX_CONFIGURABLE_TRIANGLES &&
+                 limits.maxSceneTriangleCapacity == OOT_GEO_MAX_CONFIGURABLE_TRIANGLES);
     ok &= expect("world limits",
                  limits.staticSurfaceCapacity == OOT_ENGINE_MAX_STATIC_SURFACES &&
                  limits.waterBoxCapacity == OOT_ENGINE_MAX_WATER_BOXES);

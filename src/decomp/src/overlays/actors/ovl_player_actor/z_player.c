@@ -5187,6 +5187,13 @@ s32 Player_HandleExitsAndVoids(PlayState* play, Player* this, CollisionPoly* pol
     s32 exitIndex;
     s32 temp;
 
+#if defined(LIBOOT_HOST_BUILD)
+    extern s32 liboot_world_transition_intercept(PlayState*, Player*, CollisionPoly*, u32);
+    if (liboot_world_transition_intercept(play, this, poly, bgId)) {
+        return 0;
+    }
+#endif
+
     if (this->actor.category == ACTORCAT_PLAYER) {
         exitIndex = 0;
 

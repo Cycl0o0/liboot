@@ -13,6 +13,7 @@
  * also carry material color (env = tunic) + normals for lighting.
  */
 #include "liboot.h"
+#include "core_context.h"
 #include "liboot_assets.h"
 
 #include <string.h>
@@ -37,6 +38,7 @@ extern s32 Player_OverrideLimbDrawGameplayDefault( PlayState *play, s32 limbInde
 #define VTX_CACHE     32
 #define MAX_DEPTH     16
 #define MAX_CMDS      100000
+#define MAX_SCENE_MATERIAL_REFERENCES 4096u
 #define MAX_TEXTURE_DIMENSION 1024u
 #define MAX_TEXTURE_PIXELS (1024u * 1024u)
 #define LINK_RENDER_LIMBS 21
@@ -101,11 +103,14 @@ static int sTexCount;
    interpreter state and can run one after the other. */
 static uint32_t sLinkDroppedTriangles;
 static uint32_t sSceneDroppedTriangles;
-/* Monotonic across the whole process, NOT reset by terminate: after a
-   re-init a reused index gets a strictly larger revision, so consumers that
-   cache uploads by (index, revision) always see "pixels changed". */
-static u32 sTexRevisionCounter;
 
+static struct {
+    struct OoTSceneMaterialReference entries[MAX_SCENE_MATERIAL_REFERENCES];
+    uint32_t count;
+    uint32_t activeTextureIndexPlusOne;
+    uint16_t segmentMask;
+    uint8_t truncated;
+} sSceneMaterialReferences;
 /* oot_global_terminate hook: drop every decoded texture (liboot.h contract:
    indices stay stable only until oot_global_terminate). */
 void liboot_gfx_terminate( void )
@@ -116,6 +121,8 @@ void liboot_gfx_terminate( void )
     sTexCount = 0;
     sLinkDroppedTriangles = 0;
     sSceneDroppedTriangles = 0;
+    memset( &sSceneMaterialReferences, 0,
+            sizeof( sSceneMaterialReferences ));
 }
 
 static struct {
@@ -129,8 +136,10 @@ static struct {
     u8 otherFlags;                /* OoTTriangleFlags alpha-test/decal bits from othermode */
     int texgen;                   /* G_TEXTURE_GEN: derive UV from the normal (env-map) */
     u32 otherLo;                  /* tracked G_SETOTHERMODE_L word (alpha-compare/zmode/rendermode) */
+    u32 combineHi, combineLo;     /* exact G_SETCOMBINE words for material keys */
     long cmdBudget;
     struct OoTLinkGeometryBuffers *out;
+    size_t outSize;
     /* the RSP executes DLs only after the whole flex matrix buffer is built,
        so record (dl, matrix) pairs during the walk and run them afterwards */
     struct { uintptr_t dl; int mtxIdx; int limb; } queue[FLEX_MAX_MTX];
@@ -148,8 +157,13 @@ static struct {
     u8 textureTile;               /* tile selected by G_TEXTURE */
     TmemSlot tmemMap[TMEM_MAP_SLOTS];
     int tmemNext;
-    int maxTris;                  /* per-walk triangle cap (scene > Link) */
+    uint32_t maxTris;             /* caller-selected per-walk triangle cap */
+    uint32_t numTris;
     uint32_t *droppedTriangles;   /* Link or scene counter for this walk */
+    uint64_t sourceInstance;
+    int16_t sourceId;
+    uint8_t sourceKind;
+    uint8_t renderPass;
     float texScaleS, texScaleT;
     int texEnabled;               /* combiner references TEXEL0/TEXEL1 */
     int envMul;                   /* combiner multiplies texel by ENVIRONMENT */
@@ -161,6 +175,28 @@ static struct {
     size_t seg6Size;
     u32 eyeTexAddr, mouthTexAddr; /* seg6 rewrites for seg 8/9, per frame */
 } s_gfx;
+
+#define GEOMETRY_HAS( member ) \
+    ( s_gfx.outSize >= offsetof( struct OoTLinkGeometryBuffers, member ) + \
+                       sizeof( s_gfx.out->member ))
+
+static void geometry_count_sync( void )
+{
+    if( !s_gfx.out ) return;
+    if( GEOMETRY_HAS( numTrianglesUsed32 ))
+        s_gfx.out->numTrianglesUsed32 = s_gfx.numTris;
+    s_gfx.out->numTrianglesUsed = s_gfx.numTris > UINT16_MAX
+        ? UINT16_MAX : (uint16_t)s_gfx.numTris;
+}
+
+static void geometry_source_set( uint8_t kind, int16_t id, uint64_t instance,
+                                 uint8_t renderPass )
+{
+    s_gfx.sourceKind = kind;
+    s_gfx.sourceId = id;
+    s_gfx.sourceInstance = instance;
+    s_gfx.renderPass = renderPass;
+}
 
 /* liboot vNEXT: baked vanilla vertex lighting. Kept OUTSIDE s_gfx because both
    DL-begin paths memset s_gfx every frame; the active scene's light settings
@@ -492,7 +528,7 @@ static void select_texture( const u8 *blob, size_t blobSize )
         memset( t, 0, sizeof( *t ));   /* keep reused slots recognizably free */
         return;
     }
-    t->revision = ++sTexRevisionCounter;
+    t->revision = liboot_core_context_next_texture_revision();
 
     if( getenv( "LIBOOT_TRACE" ))
         fprintf( stderr, "[T] tex%02d data=%08x pal=%08x fmt=%d siz=%d %dx%d cm=%d,%d\n",
@@ -508,6 +544,9 @@ static void select_texture( const u8 *blob, size_t blobSize )
 void liboot_gfx_evict_scene( void )
 {
     sRoomGen = 0;   /* next load starts scene-shared until set per room */
+    sSceneDroppedTriangles = 0;
+    memset( &sSceneMaterialReferences, 0,
+            sizeof( sSceneMaterialReferences ));
     for( int i = 0; i < sTexCount; ++i ) {
         u32 seg = sTexCache[i].dataAddr >> 24;
         if( sTexCache[i].rgba && ( seg == 0x02 || seg == 0x03 )) {
@@ -584,6 +623,45 @@ static int stream_fetch( Stream *st, u32 *w0, u32 *w1 )
     return 1;
 }
 
+static int32_t scene_material_reference_record( u32 address, u8 kind )
+{
+    u8 segment = (u8)( address >> 24 );
+    if( s_gfx.sourceKind != OOT_GEOMETRY_SOURCE_SCENE_ROOM ||
+        segment < 8u || segment > 15u )
+        return -1;
+    sSceneMaterialReferences.segmentMask |= (uint16_t)( 1u << segment );
+    if( sSceneMaterialReferences.count >= MAX_SCENE_MATERIAL_REFERENCES ) {
+        sSceneMaterialReferences.truncated = 1u;
+        return -1;
+    }
+    uint32_t index = sSceneMaterialReferences.count++;
+    struct OoTSceneMaterialReference *reference =
+        &sSceneMaterialReferences.entries[index];
+    memset( reference, 0, sizeof( *reference ));
+    reference->structSize = sizeof( *reference );
+    reference->version = OOT_SCENE_MATERIAL_REFERENCE_VERSION;
+    reference->segmentedAddress = address;
+    reference->firstTriangle = s_gfx.numTris;
+    reference->roomIndex = s_gfx.sourceId;
+    reference->segment = segment;
+    reference->kind = kind;
+    reference->renderPass = s_gfx.renderPass;
+    return (int32_t)index;
+}
+
+static void scene_material_texture_boundary( void )
+{
+    uint32_t active = sSceneMaterialReferences.activeTextureIndexPlusOne;
+    if( active != 0u && active <= sSceneMaterialReferences.count ) {
+        struct OoTSceneMaterialReference *reference =
+            &sSceneMaterialReferences.entries[active - 1u];
+        if( reference->firstTriangle <= s_gfx.numTris )
+            reference->numTriangles =
+                s_gfx.numTris - reference->firstTriangle;
+    }
+    sSceneMaterialReferences.activeTextureIndexPlusOne = 0u;
+}
+
 static void load_vtx( Stream *st, u32 w0, u32 w1 )
 {
     int n = ( w0 >> 12 ) & 0xFF;
@@ -630,13 +708,110 @@ static float shift_factor( u8 shift )
     return (float)( 1u << ( 16 - shift ));
 }
 
+static u32 material_hash_mix( u32 hash, u32 value )
+{
+    for( int i = 0; i < 4; ++i ) {
+        hash ^= ( value >> ( i * 8 )) & 0xFFu;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static u32 current_material_key( u16 texture, u8 triangleFlags )
+{
+    u32 hash = 2166136261u;
+    hash = material_hash_mix( hash, texture );
+    hash = material_hash_mix( hash, triangleFlags );
+    hash = material_hash_mix( hash, s_gfx.otherLo );
+    hash = material_hash_mix( hash, s_gfx.combineHi );
+    hash = material_hash_mix( hash, s_gfx.combineLo );
+    hash = material_hash_mix( hash,
+        (u32)s_gfx.tileFmt | ((u32)s_gfx.tileSiz << 8) |
+        ((u32)s_gfx.wrapS << 16) | ((u32)s_gfx.wrapT << 24));
+    for( int i = 0; i < 4; ++i ) {
+        u32 bits;
+        memcpy( &bits, &s_gfx.primColor[i], sizeof( bits ));
+        hash = material_hash_mix( hash, bits );
+        memcpy( &bits, &s_gfx.envColor[i], sizeof( bits ));
+        hash = material_hash_mix( hash, bits );
+    }
+    for( int i = 0; i < 3; ++i ) {
+        u32 bits;
+        memcpy( &bits, &s_gfx.baseColor[i], sizeof( bits ));
+        hash = material_hash_mix( hash, bits );
+    }
+    return hash;
+}
+
+static void geometry_batch_record( u16 texture, u8 triangleFlags )
+{
+    struct OoTLinkGeometryBuffers *out = s_gfx.out;
+    struct OoTGeometryBatch next;
+    struct OoTGeometryBatch *last;
+
+    if( !out || !GEOMETRY_HAS( numBatchesUsed ) || !out->batches ||
+        out->batchCapacity == 0u ) return;
+    memset( &next, 0, sizeof( next ));
+    next.firstTriangle = s_gfx.numTris;
+    next.numTriangles = 1u;
+    next.sourceInstance = s_gfx.sourceInstance;
+    next.materialKey = current_material_key( texture, triangleFlags );
+    next.renderMode = s_gfx.otherLo;
+    next.textureIndex = texture;
+    next.sourceId = s_gfx.sourceId;
+    next.sourceKind = s_gfx.sourceKind;
+    next.renderPass = s_gfx.renderPass;
+    next.blendMode = ( s_gfx.otherLo & 0x4000u )
+        ? OOT_GEOMETRY_BLEND_ALPHA
+        : ( s_gfx.renderPass == OOT_GEOMETRY_PASS_OPAQUE
+                ? OOT_GEOMETRY_BLEND_OPAQUE : OOT_GEOMETRY_BLEND_CUSTOM );
+    next.depthMode = (uint8_t)(( s_gfx.otherLo >> 10 ) & 3u );
+    next.triangleFlags = triangleFlags;
+    next.depthFlags = ( s_gfx.otherLo & 0x10u ? OOT_GEOMETRY_DEPTH_TEST : 0u ) |
+                      ( s_gfx.otherLo & 0x20u ? OOT_GEOMETRY_DEPTH_WRITE : 0u );
+    next.combineModeHi = s_gfx.combineHi;
+    next.combineModeLo = s_gfx.combineLo;
+    memcpy( next.primitiveColor, s_gfx.primColor, sizeof( next.primitiveColor ));
+    memcpy( next.environmentColor, s_gfx.envColor, sizeof( next.environmentColor ));
+    memcpy( next.baseColor, s_gfx.baseColor, sizeof( next.baseColor ));
+
+    if( out->numBatchesUsed != 0u ) {
+        last = &out->batches[out->numBatchesUsed - 1u];
+        if( last->firstTriangle + last->numTriangles == next.firstTriangle &&
+            last->sourceInstance == next.sourceInstance &&
+            last->materialKey == next.materialKey &&
+            last->renderMode == next.renderMode &&
+            last->textureIndex == next.textureIndex &&
+            last->sourceId == next.sourceId &&
+            last->sourceKind == next.sourceKind &&
+            last->renderPass == next.renderPass &&
+            last->blendMode == next.blendMode &&
+            last->depthMode == next.depthMode &&
+            last->triangleFlags == next.triangleFlags &&
+            last->depthFlags == next.depthFlags &&
+            last->combineModeHi == next.combineModeHi &&
+            last->combineModeLo == next.combineModeLo &&
+            memcmp( last->primitiveColor, next.primitiveColor,
+                    sizeof( next.primitiveColor )) == 0 &&
+            memcmp( last->environmentColor, next.environmentColor,
+                    sizeof( next.environmentColor )) == 0 &&
+            memcmp( last->baseColor, next.baseColor,
+                    sizeof( next.baseColor )) == 0 ) {
+            last->numTriangles++;
+            return;
+        }
+    }
+    if( out->numBatchesUsed < out->batchCapacity )
+        out->batches[out->numBatchesUsed++] = next;
+}
+
 static void emit_tri( int a, int b, int c )
 {
     struct OoTLinkGeometryBuffers *o = s_gfx.out;
     if( !o ) return;
     if( a < 0 || b < 0 || c < 0 ||
         a >= VTX_CACHE || b >= VTX_CACHE || c >= VTX_CACHE ) return;
-    if( o->numTrianglesUsed >= s_gfx.maxTris ) {
+    if( s_gfx.numTris >= s_gfx.maxTris ) {
         if( s_gfx.droppedTriangles && *s_gfx.droppedTriangles != UINT32_MAX )
             ( *s_gfx.droppedTriangles )++;
         return;
@@ -650,7 +825,7 @@ static void emit_tri( int a, int b, int c )
         select_texture( s_gfx.seg6, s_gfx.seg6Size );
         s_gfx.texDirty = 0;
     }
-    int base = o->numTrianglesUsed * 3;
+    size_t base = (size_t)s_gfx.numTris * 3u;
     const int idx[3] = { a, b, c };
     int tex = ( s_gfx.texEnabled && s_gfx.texOn && s_gfx.curTex >= 0 ) ? s_gfx.curTex : -1;
     for( int i = 0; i < 3; ++i ) {
@@ -711,10 +886,13 @@ static void emit_tri( int a, int b, int c )
         }
     }
     if( o->triTexture )
-        o->triTexture[o->numTrianglesUsed] = tex >= 0 ? (u16)tex : 0xFFFF;
+        o->triTexture[s_gfx.numTris] = tex >= 0 ? (u16)tex : 0xFFFF;
     if( o->triFlags )
-        o->triFlags[o->numTrianglesUsed] = s_gfx.cullMode | s_gfx.otherFlags;
-    o->numTrianglesUsed++;
+        o->triFlags[s_gfx.numTris] = s_gfx.cullMode | s_gfx.otherFlags;
+    geometry_batch_record( tex >= 0 ? (u16)tex : 0xFFFFu,
+                           s_gfx.cullMode | s_gfx.otherFlags );
+    s_gfx.numTris++;
+    geometry_count_sync();
 }
 
 static void run_dl( uintptr_t addr, int depth )
@@ -733,6 +911,8 @@ static void run_dl( uintptr_t addr, int depth )
 
         switch( op ) {
         case 0x01: /* G_VTX */
+            (void)scene_material_reference_record(
+                w1, OOT_SCENE_MATERIAL_VERTEX_DATA );
             load_vtx( &st, w0, w1 );
             break;
         case 0x05: /* G_TRI1 */
@@ -743,6 +923,8 @@ static void run_dl( uintptr_t addr, int depth )
             emit_tri(( w1 >> 17 ) & 0x7F, ( w1 >> 9 ) & 0x7F, ( w1 >> 1 ) & 0x7F );
             break;
         case 0xDE: /* G_DL */
+            (void)scene_material_reference_record(
+                w1, OOT_SCENE_MATERIAL_DISPLAY_LIST );
             if((( w0 >> 16 ) & 0xFF ) == 0x01 ) {  /* branch, no return */
                 if( !stream_open( &st, (uintptr_t)w1, blob, blobSize )) return;
             } else {
@@ -752,6 +934,8 @@ static void run_dl( uintptr_t addr, int depth )
         case 0xDF: /* G_ENDDL */
             return;
         case 0xDA: /* G_MTX */
+            (void)scene_material_reference_record(
+                w1, OOT_SCENE_MATERIAL_MATRIX );
             if( w1 >= 0x0D000000u && w1 <= 0x0DFFFFFFu ) {
                 u32 idx = ( w1 & 0x00FFFFFF ) / 0x40;
                 if( idx < (u32)s_gfx.flexCount )
@@ -804,6 +988,14 @@ static void run_dl( uintptr_t addr, int depth )
             s_gfx.envColor[3] = ( w1 & 0xFF ) / 255.0f;
             break;
         case 0xFD: /* G_SETTIMG; seg 8/9 = per-frame eye/mouth -> seg6 offset */
+            scene_material_texture_boundary();
+            {
+                int32_t reference = scene_material_reference_record(
+                    w1, OOT_SCENE_MATERIAL_TEXTURE_IMAGE );
+                if( reference >= 0 )
+                    sSceneMaterialReferences.activeTextureIndexPlusOne =
+                        (uint32_t)reference + 1u;
+            }
             if(( w1 >> 24 ) == 0x08 )      w1 = s_gfx.eyeTexAddr + ( w1 & 0x00FFFFFF );
             else if(( w1 >> 24 ) == 0x09 ) w1 = s_gfx.mouthTexAddr + ( w1 & 0x00FFFFFF );
             s_gfx.timgAddr = w1;
@@ -900,6 +1092,8 @@ static void run_dl( uintptr_t addr, int depth )
             if( s_gfx.texScaleT == 0 ) s_gfx.texScaleT = 1.0f;
             break;
         case 0xFC: { /* G_SETCOMBINE: does any slot reference TEXEL0/TEXEL1? */
+            s_gfx.combineHi = w0;
+            s_gfx.combineLo = w1;
             u32 a0 = ( w0 >> 20 ) & 0xF, c0 = ( w0 >> 15 ) & 0x1F;
             u32 a1 = ( w0 >> 5 ) & 0xF,  c1 = w0 & 0x1F;
             u32 b0 = ( w1 >> 28 ) & 0xF, b1 = ( w1 >> 24 ) & 0xF;
@@ -1041,9 +1235,15 @@ static void liboot_render_navi( Actor *navi, SkelAnime *sk )
     if( !skeleton || !sk->jointTable || sk->limbCount != NAVI_RENDER_LIMBS + 1 ||
         navi->scale.x <= 0.0f ) return;
     SkeletonWalkGuard guard = { 0, NAVI_RENDER_LIMBS, 0, 0 };
-    int trianglesBefore = s_gfx.out ? s_gfx.out->numTrianglesUsed : 0;
+    uint32_t trianglesBefore = s_gfx.numTris;
+    uint32_t batchesBefore = s_gfx.out && GEOMETRY_HAS( numBatchesUsed )
+        ? s_gfx.out->numBatchesUsed : 0u;
     uint32_t droppedBefore = s_gfx.droppedTriangles
         ? *s_gfx.droppedTriangles : 0u;
+    uint8_t previousSourceKind = s_gfx.sourceKind;
+    int16_t previousSourceId = s_gfx.sourceId;
+    uint64_t previousSourceInstance = s_gfx.sourceInstance;
+    uint8_t previousRenderPass = s_gfx.renderPass;
 
     s_gfx.lighting = 0;
     s_gfx.curTex = -1;
@@ -1062,6 +1262,8 @@ static void liboot_render_navi( Actor *navi, SkelAnime *sk )
         Matrix_Pop();
         return;
     }
+    geometry_source_set( OOT_GEOMETRY_SOURCE_NAVI, 0, (uint64_t)(uintptr_t)navi,
+                         OOT_GEOMETRY_PASS_TRANSLUCENT );
     StandardLimb *rootLimb = skeleton[0];
     Vec3f pos = { sk->jointTable[0].x, sk->jointTable[0].y, sk->jointTable[0].z };
     Vec3s rot = sk->jointTable[1];
@@ -1078,10 +1280,15 @@ static void liboot_render_navi( Actor *navi, SkelAnime *sk )
 
     Matrix_Pop();
     if(( guard.invalid || guard.walkCount != guard.limbCount ) && s_gfx.out ) {
-        s_gfx.out->numTrianglesUsed = trianglesBefore;
+        s_gfx.numTris = trianglesBefore;
+        geometry_count_sync();
+        if( GEOMETRY_HAS( numBatchesUsed ))
+            s_gfx.out->numBatchesUsed = batchesBefore;
         if( s_gfx.droppedTriangles )
             *s_gfx.droppedTriangles = droppedBefore;
     }
+    geometry_source_set( previousSourceKind, previousSourceId,
+                         previousSourceInstance, previousRenderPass );
 }
 
 /* ---- Projectile actors: capture-replay (liboot v0.6) -------------------- */
@@ -1243,8 +1450,11 @@ static void liboot_render_actor( PlayState *play, Actor *actor )
     s_gfx.primColor[0] = s_gfx.primColor[1] = s_gfx.primColor[2] = s_gfx.primColor[3] = 1.0f;
     s_gfx.envColor[0] = s_gfx.envColor[1] = s_gfx.envColor[2] = s_gfx.envColor[3] = 1.0f;
 
+    geometry_source_set( OOT_GEOMETRY_SOURCE_ACTOR, actor->id,
+                         (uint64_t)(uintptr_t)actor, OOT_GEOMETRY_PASS_OPAQUE );
     liboot_replay_capture( sActorCapOpa, gfxCtx->polyOpa.p,
                            gfxCtx->polyOpa.d, ACTOR_CAP_OPA_CMDS );
+    s_gfx.renderPass = OOT_GEOMETRY_PASS_TRANSLUCENT;
     liboot_replay_capture( sActorCapXlu, gfxCtx->polyXlu.p,
                            gfxCtx->polyXlu.d, ACTOR_CAP_XLU_CMDS );
 }
@@ -1261,18 +1471,29 @@ static void liboot_render_actors( PlayState *play )
     }
 }
 
-void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometryBuffers *out )
+void liboot_render_link( PlayState *play, Player *player,
+                         struct OoTLinkGeometryBuffers *out, size_t outSize )
 {
     SkelAnime *sk = &player->skelAnime;
     void **skeleton = sk->skeleton;
 
     sLinkDroppedTriangles = 0;
     out->numTrianglesUsed = 0;
+    if( outSize >= offsetof( struct OoTLinkGeometryBuffers, numTrianglesUsed32 ) +
+                   sizeof( out->numTrianglesUsed32 ))
+        out->numTrianglesUsed32 = 0u;
+    if( outSize >= offsetof( struct OoTLinkGeometryBuffers, numBatchesUsed ) +
+                   sizeof( out->numBatchesUsed ))
+        out->numBatchesUsed = 0u;
     if( !skeleton || !sk->jointTable || sk->limbCount != LINK_RENDER_LIMBS + 1 ) return;
 
     memset( &s_gfx, 0, sizeof( s_gfx ));
     s_gfx.out = out;
-    s_gfx.maxTris = OOT_GEO_MAX_TRIANGLES;
+    s_gfx.outSize = outSize;
+    s_gfx.maxTris = GEOMETRY_HAS( triangleCapacity ) && out->triangleCapacity != 0u
+        ? out->triangleCapacity : OOT_GEO_MAX_TRIANGLES;
+    if( s_gfx.maxTris > OOT_GEO_MAX_CONFIGURABLE_TRIANGLES )
+        s_gfx.maxTris = OOT_GEO_MAX_CONFIGURABLE_TRIANGLES;
     s_gfx.droppedTriangles = &sLinkDroppedTriangles;
     s_gfx.cmdBudget = MAX_CMDS;
     s_gfx.lighting = 1;
@@ -1281,6 +1502,8 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
     s_gfx.texOn = 1;
     s_gfx.texScaleS = s_gfx.texScaleT = 65535.0f / 65536.0f; /* gsSPTexture default */
     s_gfx.cullMode = OOT_TRI_CULL_BACK;  /* Link's setup enables G_CULL_BACK */
+    geometry_source_set( OOT_GEOMETRY_SOURCE_LINK, 0, 0u,
+                         OOT_GEOMETRY_PASS_OPAQUE );
 
     /* Per-frame face selection (mirrors Player_DrawImpl, z_player_lib.c):
        eye/mouth indices ride 2 extra bytes per animation frame, read back as
@@ -1359,6 +1582,9 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
     Matrix_Pop();
     if( sLinkWalk.invalid || sLinkWalk.walkCount != sLinkWalk.limbCount ) {
         out->numTrianglesUsed = 0;
+        if( GEOMETRY_HAS( numTrianglesUsed32 )) out->numTrianglesUsed32 = 0u;
+        if( GEOMETRY_HAS( numBatchesUsed )) out->numBatchesUsed = 0u;
+        s_gfx.numTris = 0u;
         sLinkDroppedTriangles = 0;
         return;
     }
@@ -1377,14 +1603,14 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
         s_gfx.baseColor[1] = mat[1];
         s_gfx.baseColor[2] = mat[2];
         s_gfx.primColor[0] = s_gfx.primColor[1] = s_gfx.primColor[2] = 1.0f;
-        int before = out->numTrianglesUsed;
+        uint32_t before = s_gfx.numTris;
         run_dl( s_gfx.queue[i].dl, 0 );
         if( getenv( "LIBOOT_TRACE" ))
             fprintf( stderr, "[G] q%02d mtx%02d dl=%c%08x t=(%.1f %.1f %.1f) tris+%d\n",
                      i, s_gfx.queue[i].mtxIdx, s_gfx.queue[i].dl > 0xFFFFFFFFu ? 'N' : 'S',
                      (u32)( s_gfx.queue[i].dl & 0xFFFFFFFFu ),
                      s_gfx.cur.xw, s_gfx.cur.yw, s_gfx.cur.zw,
-                     out->numTrianglesUsed - before );
+                     (int)( s_gfx.numTris - before ));
     }
 
     if( sNaviRenderEnabled && naviActor != NULL && naviActor->id == ACTOR_EN_ELF )
@@ -1406,9 +1632,18 @@ void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometry
 void liboot_scene_dl_begin( struct OoTLinkGeometryBuffers *out, int maxTris )
 {
     sSceneDroppedTriangles = 0;
+    memset( &sSceneMaterialReferences, 0, sizeof( sSceneMaterialReferences ));
+    out->numTrianglesUsed = 0u;
+    out->numTrianglesUsed32 = 0u;
+    out->numBatchesUsed = 0u;
     memset( &s_gfx, 0, sizeof( s_gfx ));
     s_gfx.out = out;
-    s_gfx.maxTris = maxTris > 0 ? maxTris : OOT_GEO_MAX_TRIANGLES;
+    s_gfx.outSize = sizeof( *out );
+    s_gfx.maxTris = out->triangleCapacity != 0u
+        ? out->triangleCapacity
+        : ( maxTris > 0 ? (uint32_t)maxTris : OOT_GEO_MAX_TRIANGLES );
+    if( s_gfx.maxTris > OOT_GEO_MAX_CONFIGURABLE_TRIANGLES )
+        s_gfx.maxTris = OOT_GEO_MAX_CONFIGURABLE_TRIANGLES;
     s_gfx.droppedTriangles = &sSceneDroppedTriangles;
     s_gfx.cmdBudget = MAX_CMDS;
     s_gfx.lighting = 1;               /* room tris are lit (real normals) */
@@ -1423,13 +1658,51 @@ void liboot_scene_dl_begin( struct OoTLinkGeometryBuffers *out, int maxTris )
     s_gfx.baseColor[0] = s_gfx.baseColor[1] = s_gfx.baseColor[2] = 1.0f;
     s_gfx.primColor[0] = s_gfx.primColor[1] = s_gfx.primColor[2] = s_gfx.primColor[3] = 1.0f;
     s_gfx.envColor[0] = s_gfx.envColor[1] = s_gfx.envColor[2] = s_gfx.envColor[3] = 1.0f;
+    geometry_source_set( OOT_GEOMETRY_SOURCE_SCENE_ROOM,
+                         sRoomGen == 0u ? -1 : (int16_t)( sRoomGen - 1u ), 0u,
+                         OOT_GEOMETRY_PASS_OPAQUE );
     /* identity: room vertices are already world-space */
     s_gfx.cur.xx = s_gfx.cur.yy = s_gfx.cur.zz = s_gfx.cur.ww = 1.0f;
+}
+
+void liboot_scene_dl_set_source( int roomIdx, int pass )
+{
+    geometry_source_set( OOT_GEOMETRY_SOURCE_SCENE_ROOM, (int16_t)roomIdx, 0u,
+                         pass ? OOT_GEOMETRY_PASS_TRANSLUCENT
+                              : OOT_GEOMETRY_PASS_OPAQUE );
 }
 
 void liboot_scene_dl_run( u32 dlAddr )
 {
     run_dl( (uintptr_t)dlAddr, 0 );
+    /* Root DL boundaries are also texture-state boundaries: state may persist
+       for rendering, but an exported affected range must never bleed into the
+       next independently addressed room entry. */
+    scene_material_texture_boundary();
+}
+
+uint32_t liboot_scene_material_reference_count( void )
+{
+    return sSceneMaterialReferences.count;
+}
+
+bool liboot_scene_material_reference_get(
+    uint32_t index, struct OoTSceneMaterialReference *outReference )
+{
+    if( outReference == NULL || index >= sSceneMaterialReferences.count )
+        return false;
+    *outReference = sSceneMaterialReferences.entries[index];
+    return true;
+}
+
+uint16_t liboot_scene_material_segment_mask( void )
+{
+    return sSceneMaterialReferences.segmentMask;
+}
+
+bool liboot_scene_material_references_truncated( void )
+{
+    return sSceneMaterialReferences.truncated != 0u;
 }
 
 uint32_t oot_link_get_geometry_dropped_triangles( void )

@@ -8,7 +8,9 @@
  */
 #include "liboot.h"
 #include "audio_extract.h"
+#include "audio_mixer.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -124,14 +126,15 @@ typedef struct {
     const uint8_t *tunedSample;
     uint32_t numSamples, loopStart, loopCount;
     double sourceRate;
-    double position;
+    uint64_t positionQ16;
     const uint8_t *adsrEnvelope;
     size_t adsrEnvelopeSize;
     double adsrSamplesUntilTick;
     double portamentoSamplesUntilTick;
-    float env, envTarget, envStep;
+    LibootAudioRamp envRamp;
+    int32_t envQ15;
     float adsrCurrent, adsrTarget, adsrVelocity, adsrFadeOutVel, adsrSustain;
-    float volume, pan, reverb;
+    int32_t volumeQ15, panQ15, reverbQ15;
     float oscPhase, oscStep;
     float portamentoScale;
     int16_t adsrDelay;
@@ -173,9 +176,10 @@ static const uint8_t s_defaultShortGate[16] = {
 
 static SeqPlayer s_players[SEQ_PLAYERS];
 static AudioVoice s_voices[AUDIO_VOICES];
-static float s_reverb[REVERB_FRAMES * 2u];
-static uint32_t s_reverbPos, s_voiceSerial = 1, s_random = 0x12345678u;
-static float s_masterVolume = 0.85f;
+static int16_t s_reverb[REVERB_FRAMES * 2u];
+static LibootAudioReverb s_reverbState;
+static uint32_t s_voiceSerial = 1, s_random = 0x12345678u;
+static int32_t s_masterVolumeQ15 = 27852; /* round(0.85 * 32767) */
 static uint8_t s_sfxRotation[7];
 static uint16_t s_sfxChannelId[SEQ_CHANNELS];
 static float s_sfxChannelPan[SEQ_CHANNELS];
@@ -621,9 +625,8 @@ static void voice_adsr_init( AudioVoice *voice, const AdsrSettings *settings )
     voice->adsrEnvelopeSize = settings && settings->envelope ?
                               settings->envelopeSize : sizeof( s_defaultEnvelope );
     voice->adsrSamplesUntilTick = 0.0;
-    voice->env = 0.0f;
-    voice->envTarget = 0.0f;
-    voice->envStep = 0.0f;
+    voice->envQ15 = 0;
+    liboot_audio_ramp_start( &voice->envRamp, 0, 0, 0u );
     voice->adsrCurrent = 0.0f;
     voice->adsrTarget = 0.0f;
     voice->adsrVelocity = 0.0f;
@@ -740,15 +743,18 @@ static bool voice_adsr_sample( AudioVoice *voice, uint32_t sampleRate )
         double interval = sampleRate / RETAIL_ADSR_TICKS_PER_SECOND;
         if( interval < 1.0 ) interval = 1.0;
         float target = voice_adsr_update_tick( voice );
-        voice->envTarget = target;
-        voice->envStep = ( target - voice->env ) / (float)interval;
         voice->adsrSamplesUntilTick += interval;
+        uint32_t rampFrames = (uint32_t)ceil( voice->adsrSamplesUntilTick );
+        if( rampFrames == 0u ) rampFrames = 1u;
+        liboot_audio_ramp_start( &voice->envRamp, voice->envQ15,
+                                 liboot_audio_float_to_q15( target ),
+                                 rampFrames );
         voice->adsrDisableAfterRamp = voice->adsrState == VOICE_ADSR_DISABLED;
     }
-    voice->env += voice->envStep;
+    voice->envQ15 = liboot_audio_ramp_tick( &voice->envRamp );
     voice->adsrSamplesUntilTick -= 1.0;
     if( voice->adsrSamplesUntilTick <= 0.0 ) {
-        voice->env = voice->envTarget;
+        voice->envQ15 = voice->envRamp.target;
         if( voice->adsrDisableAfterRamp ) {
             voice->active = 0;
             return false;
@@ -830,11 +836,11 @@ static void voices_stop_player( uint8_t player, bool release )
 static AudioVoice *voice_allocate( uint8_t player, uint8_t channel, uint8_t layer )
 {
     int selected = -1;
-    float quietest = 2.0f;
+    int32_t quietest = INT32_MAX;
     for( int i = 0; i < AUDIO_VOICES; ++i ) {
         if( !s_voices[i].active ) { selected = i; break; }
-        if( s_voices[i].releasing && s_voices[i].env < quietest ) {
-            quietest = s_voices[i].env;
+        if( s_voices[i].releasing && s_voices[i].envQ15 < quietest ) {
+            quietest = s_voices[i].envQ15;
             selected = i;
         }
     }
@@ -887,9 +893,9 @@ static bool voice_start_sample( SeqPlayer *p, uint8_t channelIndex, uint8_t laye
     voice->numSamples = sample->numSamples;
     voice->sourceRate = sample->sampleRate;
     voice->loopStart = sample->loopStart < sample->numSamples ? sample->loopStart : 0;
-    voice->volume = clamp01( volume );
-    voice->pan = clamp01( pan );
-    voice->reverb = clamp01( reverb );
+    voice->volumeQ15 = liboot_audio_float_to_q15( clamp01( volume ));
+    voice->panQ15 = liboot_audio_float_to_q15( clamp01( pan ));
+    voice->reverbQ15 = liboot_audio_float_to_q15( clamp01( reverb ));
     voice->sfxId = p->index == OOT_AUDIO_PLAYER_SFX && channelIndex < SEQ_CHANNELS ?
                    s_sfxChannelId[channelIndex] : 0;
     if( pitchScale > 0.0f && isfinite( pitchScale ))
@@ -926,9 +932,9 @@ static void voice_start_wave( SeqPlayer *p, uint8_t channelIndex, uint8_t layerI
     voice->wave = wave;
     voice->oscStep = 440.0f * exp2f(( pitch - 48 ) / 12.0f );
     if( pitchScale > 0.0f && isfinite( pitchScale )) voice->oscStep *= pitchScale;
-    voice->volume = clamp01( volume );
-    voice->pan = clamp01( pan );
-    voice->reverb = clamp01( reverb );
+    voice->volumeQ15 = liboot_audio_float_to_q15( clamp01( volume ));
+    voice->panQ15 = liboot_audio_float_to_q15( clamp01( pan ));
+    voice->reverbQ15 = liboot_audio_float_to_q15( clamp01( reverb ));
     voice->sfxId = p->index == OOT_AUDIO_PLAYER_SFX && channelIndex < SEQ_CHANNELS ?
                    s_sfxChannelId[channelIndex] : 0;
     if( initializeAdsr )
@@ -1140,7 +1146,8 @@ void oot_audio_channel_set_io( uint8_t player, uint8_t channel, uint8_t port, in
 
 void oot_audio_set_master_volume( float volume )
 {
-    if( isfinite( volume )) s_masterVolume = clamp01( volume );
+    if( isfinite( volume ))
+        s_masterVolumeQ15 = liboot_audio_float_to_q15( clamp01( volume ));
 }
 
 void oot_audio_stop_all( uint16_t fadeOutMs )
@@ -1989,7 +1996,7 @@ static float noise_wave_sample( float phase, uint32_t bins, uint32_t seed )
     return ( value & 0xFFFFu ) / 32767.5f - 1.0f;
 }
 
-static float oscillator_sample( AudioVoice *voice, uint32_t sampleRate )
+static int16_t oscillator_sample( AudioVoice *voice, uint32_t sampleRate )
 {
     float phase = voice->oscPhase;
     float angle = phase * 6.2831853071795864769f;
@@ -2012,30 +2019,56 @@ static float oscillator_sample( AudioVoice *voice, uint32_t sampleRate )
     phase += voice->oscStep * voice->portamentoScale / sampleRate;
     phase -= floorf( phase );
     voice->oscPhase = phase;
-    return sample * 0.65f;
+    return liboot_audio_saturate_s16(
+        (int32_t)lroundf( sample * 0.65f * INT16_MAX ));
 }
 
-static bool voice_pcm_sample( AudioVoice *voice, uint32_t sampleRate, float *out )
+static uint32_t voice_resample_step( const AudioVoice *voice,
+                                     uint32_t sampleRate )
 {
-    if( !voice->pcm || voice->numSamples == 0 ) return false;
-    uint32_t i0 = (uint32_t)voice->position;
-    if( i0 >= voice->numSamples ) return false;
-    uint32_t i1 = i0 + 1 < voice->numSamples ? i0 + 1 : i0;
-    float frac = (float)( voice->position - i0 );
-    *out = ( voice->pcm[i0] + ( voice->pcm[i1] - voice->pcm[i0] ) * frac ) / 32768.0f;
-    voice->position += voice->sourceRate * voice->portamentoScale / sampleRate;
-    if( voice->position >= voice->numSamples ) {
-        bool loop = voice->loopStart < voice->numSamples &&
-                    ( voice->loopCount == UINT32_MAX || voice->loopCount > 0 );
-        if( loop ) {
-            double excess = voice->position - voice->numSamples;
-            double length = voice->numSamples - voice->loopStart;
-            if( voice->loopCount != UINT32_MAX ) --voice->loopCount;
-            voice->position = voice->loopStart + fmod( excess, length );
-        } else {
-            voice->active = 0;
-        }
+    double step = voice->sourceRate * voice->portamentoScale * 65536.0 /
+                  sampleRate;
+    if( step < 1.0 ) return 1u;
+    if( step >= UINT32_MAX ) return UINT32_MAX;
+    return (uint32_t)( step + 0.5 );
+}
+
+static bool voice_pcm_sample( AudioVoice *voice, uint32_t sampleRate,
+                              int16_t *out )
+{
+    uint64_t endQ16;
+    uint64_t loopStartQ16;
+    uint64_t loopLengthQ16;
+    bool looping;
+    if( !voice->pcm || voice->numSamples == 0u || out == NULL ) return false;
+    endQ16 = (uint64_t)voice->numSamples << 16;
+    if( voice->positionQ16 >= endQ16 ) return false;
+    looping = voice->loopStart < voice->numSamples &&
+              ( voice->loopCount == UINT32_MAX || voice->loopCount > 0u );
+    *out = liboot_audio_resample_s16( voice->pcm, voice->numSamples,
+                                      voice->loopStart, looping,
+                                      voice->positionQ16 );
+    voice->positionQ16 += voice_resample_step( voice, sampleRate );
+    if( voice->positionQ16 < endQ16 ) return true;
+
+    if( !looping ) {
+        voice->active = 0;
+        return true;
     }
+    loopStartQ16 = (uint64_t)voice->loopStart << 16;
+    loopLengthQ16 = endQ16 - loopStartQ16;
+    uint64_t excess = voice->positionQ16 - endQ16;
+    uint64_t boundaries = 1u + excess / loopLengthQ16;
+    if( voice->loopCount != UINT32_MAX ) {
+        if( boundaries > voice->loopCount ) {
+            voice->loopCount = 0u;
+            voice->positionQ16 = endQ16;
+            voice->active = 0;
+            return true;
+        }
+        voice->loopCount -= (uint32_t)boundaries;
+    }
+    voice->positionQ16 = loopStartQ16 + excess % loopLengthQ16;
     return true;
 }
 
@@ -2060,9 +2093,11 @@ static void player_update_fade( SeqPlayer *p, uint32_t sampleRate )
     }
 }
 
-uint32_t oot_audio_render_f32( float *stereo, uint32_t frames, uint32_t sampleRate )
+uint32_t oot_audio_render_s16( int16_t *stereo, uint32_t frames,
+                               uint32_t sampleRate )
 {
-    if( !stereo || frames == 0 || sampleRate < 8000 || sampleRate > 192000 ) return 0;
+    if( !stereo || frames == 0u || sampleRate < 8000u || sampleRate > 192000u ||
+        (size_t)frames > SIZE_MAX / ( 2u * sizeof( *stereo ))) return 0u;
     memset( stereo, 0, (size_t)frames * 2u * sizeof( *stereo ));
 
     for( uint32_t frame = 0; frame < frames; ++frame ) {
@@ -2082,7 +2117,7 @@ uint32_t oot_audio_render_f32( float *stereo, uint32_t frames, uint32_t sampleRa
             ++p->framesRendered;
         }
 
-        float left = 0.0f, right = 0.0f, sendL = 0.0f, sendR = 0.0f;
+        int32_t left = 0, right = 0, sendL = 0, sendR = 0;
         for( int i = 0; i < AUDIO_VOICES; ++i ) {
             AudioVoice *voice = &s_voices[i];
             if( !voice->active || voice->player >= SEQ_PLAYERS ) continue;
@@ -2091,31 +2126,59 @@ uint32_t oot_audio_render_f32( float *stereo, uint32_t frames, uint32_t sampleRa
             if( !voice_adsr_sample( voice, sampleRate )) continue;
             voice_portamento_sample( voice, sampleRate );
 
-            float sample = 0.0f;
+            int16_t sample = 0;
             bool valid = voice->oscillator ?
                 ( sample = oscillator_sample( voice, sampleRate ), true ) :
                 voice_pcm_sample( voice, sampleRate, &sample );
             if( !valid ) { voice->active = 0; continue; }
 
             float playerGain = p->seqVolume * p->userVolume * p->fadeGain;
-            float gain = sample * voice->volume * voice->env * playerGain;
-            float gainL = sqrtf( 1.0f - voice->pan );
-            float gainR = sqrtf( voice->pan );
-            left += gain * gainL;
-            right += gain * gainR;
-            sendL += gain * gainL * voice->reverb;
-            sendR += gain * gainR * voice->reverb;
+            int32_t gain = liboot_audio_q15_mul( sample, voice->volumeQ15 );
+            gain = liboot_audio_q15_mul( gain, voice->envQ15 );
+            gain = liboot_audio_q15_mul(
+                gain, liboot_audio_float_to_q15( clamp01( playerGain )));
+            int32_t panLeft, panRight;
+            liboot_audio_pan_q15((uint16_t)voice->panQ15,
+                                 &panLeft, &panRight );
+            int32_t voiceLeft = liboot_audio_q15_mul( gain, panLeft );
+            int32_t voiceRight = liboot_audio_q15_mul( gain, panRight );
+            left = liboot_audio_saturate_s16((int64_t)left + voiceLeft );
+            right = liboot_audio_saturate_s16((int64_t)right + voiceRight );
+            sendL = liboot_audio_saturate_s16(
+                (int64_t)sendL +
+                liboot_audio_q15_mul( voiceLeft, voice->reverbQ15 ));
+            sendR = liboot_audio_saturate_s16(
+                (int64_t)sendR +
+                liboot_audio_q15_mul( voiceRight, voice->reverbQ15 ));
         }
 
-        uint32_t rp = s_reverbPos * 2u;
-        float wetL = s_reverb[rp], wetR = s_reverb[rp + 1];
-        s_reverb[rp] = sendL * 0.35f + wetL * 0.62f;
-        s_reverb[rp + 1] = sendR * 0.35f + wetR * 0.62f;
-        s_reverbPos = ( s_reverbPos + 1u ) % REVERB_FRAMES;
-        left = ( left + wetL * 0.28f ) * s_masterVolume;
-        right = ( right + wetR * 0.28f ) * s_masterVolume;
-        stereo[frame * 2u] = left < -1.0f ? -1.0f : left > 1.0f ? 1.0f : left;
-        stereo[frame * 2u + 1] = right < -1.0f ? -1.0f : right > 1.0f ? 1.0f : right;
+        int16_t mixedLeft, mixedRight;
+        liboot_audio_reverb_stereo( &s_reverbState, left, right, sendL, sendR,
+                                    &mixedLeft, &mixedRight );
+        size_t output = (size_t)frame * 2u;
+        stereo[output] = liboot_audio_saturate_s16(
+            liboot_audio_q15_mul( mixedLeft, s_masterVolumeQ15 ));
+        stereo[output + 1u] = liboot_audio_saturate_s16(
+            liboot_audio_q15_mul( mixedRight, s_masterVolumeQ15 ));
+    }
+    return frames;
+}
+
+uint32_t oot_audio_render_f32( float *stereo, uint32_t frames,
+                               uint32_t sampleRate )
+{
+    enum { CONVERSION_FRAMES = 256 };
+    int16_t fixed[CONVERSION_FRAMES * 2u];
+    uint32_t written = 0u;
+    if( !stereo || frames == 0u || sampleRate < 8000u || sampleRate > 192000u ||
+        (size_t)frames > SIZE_MAX / ( 2u * sizeof( *stereo ))) return 0u;
+    while( written < frames ) {
+        uint32_t chunk = frames - written;
+        if( chunk > CONVERSION_FRAMES ) chunk = CONVERSION_FRAMES;
+        if( oot_audio_render_s16( fixed, chunk, sampleRate ) != chunk ) return 0u;
+        for( uint32_t i = 0u; i < chunk * 2u; ++i )
+            stereo[(size_t)written * 2u + i] = fixed[i] / 32768.0f;
+        written += chunk;
     }
     return frames;
 }
@@ -2127,10 +2190,15 @@ void liboot_audio_sequence_reset( void )
     memset( s_reverb, 0, sizeof( s_reverb ));
     memset( s_sfxRotation, 0, sizeof( s_sfxRotation ));
     sfx_channel_state_reset();
-    s_reverbPos = 0;
+    memset( &s_reverbState, 0, sizeof( s_reverbState ));
+    s_reverbState.delay = s_reverb;
+    s_reverbState.delayFrames = REVERB_FRAMES;
+    s_reverbState.inputGainQ15 = liboot_audio_float_to_q15( 0.35f );
+    s_reverbState.feedbackQ15 = liboot_audio_float_to_q15( 0.62f );
+    s_reverbState.outputGainQ15 = liboot_audio_float_to_q15( 0.28f );
     s_voiceSerial = 1;
     s_random = 0x12345678u;
-    s_masterVolume = 0.85f;
+    s_masterVolumeQ15 = 27852;
     for( uint8_t p = 0; p < SEQ_PLAYERS; ++p ) {
         s_players[p].index = p;
         s_players[p].userVolume = 1.0f;

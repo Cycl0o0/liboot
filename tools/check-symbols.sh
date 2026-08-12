@@ -38,8 +38,12 @@ extract() {
         llvm-readobj --coff-exports "$lib"
       elif command -v llvm-nm >/dev/null 2>&1; then
         llvm-nm --defined-only --extern-only "$lib"
+      elif command -v objdump >/dev/null 2>&1; then
+        # GNU binutils (the standard MSYS2/MinGW toolchain) prints the PE
+        # export-name table in `objdump -p` output.
+        objdump -p "$lib"
       else
-        echo "check-symbols: need dumpbin, llvm-readobj, or llvm-nm on PATH" >&2
+        echo "check-symbols: need dumpbin, llvm-readobj, llvm-nm, or objdump on PATH" >&2
         exit 2
       fi | grep -oE 'oot_[A-Za-z0-9_]+'
       ;;

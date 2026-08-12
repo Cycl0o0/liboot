@@ -56,7 +56,7 @@ generate a separate trace or canonicalize it before recording.
 
 ## What is compared
 
-Every completed 20 Hz tick records:
+Every completed PAL gameplay tick records:
 
 - Link position, velocity, facing, action, canonical animation id + frame,
   health, magic, targeting, water, aim, floor-SFX, attack, and state flags;

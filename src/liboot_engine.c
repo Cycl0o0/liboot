@@ -3,15 +3,20 @@
  */
 
 #include "liboot_engine.h"
+#include "core_context.h"
 
 #include <math.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define ENGINE_MAGIC 0x4F4F5445u /* "OOTE" */
 #define ENGINE_TARGET_SLOTS OOT_ENGINE_MAX_TARGETS
 #define ENGINE_TARGET_INDEX_MASK 0xFFu
+#define ENGINE_HOST_ACTOR_SLOTS OOT_ENGINE_MAX_HOST_ACTORS
+#define ENGINE_HOST_ACTOR_INDEX_MASK 0xFFu
+#define ENGINE_KNOWN_HOST_ACTOR_FLAGS \
+    ((uint32_t)(OOT_HOST_ACTOR_ENABLED | OOT_HOST_ACTOR_TARGETABLE | \
+                OOT_HOST_ACTOR_HOSTILE | OOT_HOST_ACTOR_HURT))
 #define ENGINE_KNOWN_RENDER_FLAGS \
     ((uint32_t)(OOT_ENGINE_RENDER_NAVI | OOT_ENGINE_RENDER_ACTORS))
 #define ENGINE_KNOWN_BUTTONS \
@@ -40,6 +45,7 @@ typedef struct EngineGeometryStorage
     uint16_t *triTexture;
     float *alpha;   /* liboot vNEXT: 1 float/vertex shade alpha */
     uint8_t *triFlags;  /* liboot vNEXT: 1 byte/triangle render flags */
+    struct OoTGeometryBatch *batches;
 } EngineGeometryStorage;
 
 typedef struct EngineTargetSlot
@@ -49,10 +55,27 @@ typedef struct EngineTargetSlot
     uint8_t active;
 } EngineTargetSlot;
 
+typedef struct EngineHostActorSlot
+{
+    int32_t nativeId;
+    uint32_t generation;
+    uint8_t active;
+} EngineHostActorSlot;
+
+typedef struct EngineDynamicCollisionSlot
+{
+    OoTDynamicCollision nativeHandle;
+    uint32_t generation;
+    uint8_t active;
+} EngineDynamicCollisionSlot;
+
 struct OoTEngine
 {
     uint32_t magic;
+    LibootCoreContext *coreContext;
     uint32_t actorCapacity;
+    uint32_t linkTriangleCapacity;
+    uint32_t sceneTriangleCapacity;
     uint32_t maxSubsteps;
     uint32_t renderFlags;
     float fixedStepSeconds;
@@ -79,19 +102,25 @@ struct OoTEngine
     OoTEngineFrame frame;
     OoTEngineSceneGeometry sceneGeometry;
     EngineTargetSlot targets[ENGINE_TARGET_SLOTS];
+    EngineHostActorSlot hostActors[ENGINE_HOST_ACTOR_SLOTS];
+    EngineDynamicCollisionSlot dynamicCollisions[OOT_DYNAMIC_COLLISION_MAX_OBJECTS];
 };
 
-static atomic_flag s_engineGuard = ATOMIC_FLAG_INIT;
-static _Atomic(OoTEngine *) s_activeEngine = NULL;
+/* This value intentionally belongs to the switched module image: each core
+ * context records the wrapper handle that owns it. Callback dispatch is TLS
+ * instead, because callbacks run only while the corresponding engine holds
+ * the process-wide core lock. */
+static OoTEngine *s_activeEngine;
 
 static int engine_try_guard(void)
 {
-    return !atomic_flag_test_and_set_explicit(&s_engineGuard, memory_order_acquire);
+    return liboot_core_context_lock();
 }
 
 static void engine_unguard(void)
 {
-    atomic_flag_clear_explicit(&s_engineGuard, memory_order_release);
+    (void)liboot_core_context_set_thread_owner(NULL);
+    liboot_core_context_unlock();
 }
 
 static OoTResult engine_lock(OoTEngine *engine)
@@ -102,10 +131,19 @@ static OoTResult engine_lock(OoTEngine *engine)
     if (!engine_try_guard()) {
         return OOT_ENGINE_RESULT_BUSY;
     }
-    if (atomic_load_explicit(&s_activeEngine, memory_order_acquire) != engine ||
-        engine->magic != ENGINE_MAGIC) {
+#if defined(LIBOOT_MULTI_INSTANCE)
+    if (!liboot_core_context_activate_owner(engine, NULL)) {
         engine_unguard();
         return OOT_ENGINE_RESULT_NOT_INITIALIZED;
+    }
+#endif
+    if (s_activeEngine != engine || engine->magic != ENGINE_MAGIC) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_INITIALIZED;
+    }
+    if (!liboot_core_context_set_thread_owner(engine)) {
+        liboot_core_context_unlock();
+        return OOT_ENGINE_RESULT_OUT_OF_MEMORY;
     }
     return OOT_ENGINE_RESULT_OK;
 }
@@ -130,7 +168,7 @@ static int config_has(const OoTEngineConfig *config, size_t memberEnd)
 
 static void engine_debug_trampoline(const char *message)
 {
-    OoTEngine *engine = atomic_load_explicit(&s_activeEngine, memory_order_acquire);
+    OoTEngine *engine = (OoTEngine *)liboot_core_context_get_thread_owner();
     if (engine != NULL) {
         /* oot_global_init predates return codes.  Its terminal diagnostics
            are the only supported status channel, so consume them internally
@@ -151,7 +189,7 @@ static void engine_debug_trampoline(const char *message)
 
 static void engine_sfx_trampoline(const struct OoTSfxEvent *event)
 {
-    OoTEngine *engine = atomic_load_explicit(&s_activeEngine, memory_order_acquire);
+    OoTEngine *engine = (OoTEngine *)liboot_core_context_get_thread_owner();
     if (engine != NULL && engine->sfxCallback != NULL) {
         engine->sfxCallback(engine->sfxUserData, event);
     }
@@ -169,11 +207,13 @@ static int geometry_storage_allocate(EngineGeometryStorage *storage, uint32_t tr
     storage->triTexture = (uint16_t *)malloc(triangles * sizeof(uint16_t));
     storage->alpha = (float *)malloc(triangles * 3u * sizeof(float));
     storage->triFlags = (uint8_t *)malloc(triangles * sizeof(uint8_t));
+    storage->batches = (struct OoTGeometryBatch *)malloc(
+        triangles * sizeof(*storage->batches));
 
     return storage->position != NULL && storage->normal != NULL &&
            storage->color != NULL && storage->uv != NULL &&
            storage->triTexture != NULL && storage->alpha != NULL &&
-           storage->triFlags != NULL;
+           storage->triFlags != NULL && storage->batches != NULL;
 }
 
 static void geometry_storage_free(EngineGeometryStorage *storage)
@@ -185,6 +225,7 @@ static void geometry_storage_free(EngineGeometryStorage *storage)
     free(storage->triTexture);
     free(storage->alpha);
     free(storage->triFlags);
+    free(storage->batches);
     memset(storage, 0, sizeof(*storage));
 }
 
@@ -216,9 +257,11 @@ static void frame_views_init(OoTEngine *engine)
     frame->geometry.triTexture = engine->frameStorage.triTexture;
     frame->geometry.alpha = engine->frameStorage.alpha;
     frame->geometry.triFlags = engine->frameStorage.triFlags;
-    frame->geometry.triangleCapacity = OOT_GEO_MAX_TRIANGLES;
+    frame->geometry.triangleCapacity = engine->linkTriangleCapacity;
     frame->actors = engine->actorStorage;
     frame->actorCapacity = engine->actorCapacity;
+    frame->geometryBatches = engine->frameStorage.batches;
+    frame->geometryBatchCapacity = engine->linkTriangleCapacity;
     frame->navi.structSize = sizeof(frame->navi);
 
     memset(&engine->sceneGeometry, 0, sizeof(engine->sceneGeometry));
@@ -230,7 +273,9 @@ static void frame_views_init(OoTEngine *engine)
     engine->sceneGeometry.triTexture = engine->sceneStorage.triTexture;
     engine->sceneGeometry.alpha = engine->sceneStorage.alpha;
     engine->sceneGeometry.triFlags = engine->sceneStorage.triFlags;
-    engine->sceneGeometry.triangleCapacity = OOT_SCENE_MAX_TRIANGLES;
+    engine->sceneGeometry.triangleCapacity = engine->sceneTriangleCapacity;
+    engine->sceneGeometry.batches = engine->sceneStorage.batches;
+    engine->sceneGeometry.batchCapacity = engine->sceneTriangleCapacity;
 }
 
 static void targets_invalidate(OoTEngine *engine, int removeNative)
@@ -243,10 +288,6 @@ static void targets_invalidate(OoTEngine *engine, int removeNative)
         }
         slot->active = 0u;
         slot->nativeId = -1;
-        slot->generation++;
-        if (slot->generation == 0u || slot->generation > 0xFFFFFFu) {
-            slot->generation = 1u;
-        }
     }
 }
 
@@ -281,9 +322,80 @@ static EngineTargetSlot *target_find(OoTEngine *engine, OoTEngineTarget target)
     return slot;
 }
 
+static OoTEngineHostActor host_actor_handle(uint32_t index, uint32_t generation)
+{
+    return (generation << 8) | (index + 1u);
+}
+
+static EngineHostActorSlot *host_actor_find(OoTEngine *engine,
+                                             OoTEngineHostActor actor)
+{
+    uint32_t encodedIndex = actor & ENGINE_HOST_ACTOR_INDEX_MASK;
+    uint32_t index;
+    uint32_t generation;
+    EngineHostActorSlot *slot;
+    if (actor == OOT_ENGINE_INVALID_HOST_ACTOR || encodedIndex == 0u) {
+        return NULL;
+    }
+    index = encodedIndex - 1u;
+    generation = actor >> 8;
+    if (index >= ENGINE_HOST_ACTOR_SLOTS || generation == 0u) {
+        return NULL;
+    }
+    slot = &engine->hostActors[index];
+    return slot->active && slot->generation == generation ? slot : NULL;
+}
+
+static void host_actors_invalidate(OoTEngine *engine, int removeNative)
+{
+    uint32_t i;
+    for (i = 0u; i < ENGINE_HOST_ACTOR_SLOTS; ++i) {
+        EngineHostActorSlot *slot = &engine->hostActors[i];
+        if (slot->active && removeNative) {
+            (void)oot_host_actor_remove(slot->nativeId);
+        }
+        slot->active = 0u;
+        slot->nativeId = -1;
+    }
+}
+
+static OoTDynamicCollision dynamic_collision_handle(uint32_t index,
+                                                     uint32_t generation)
+{
+    return (generation << 8) | (index + 1u);
+}
+
+static EngineDynamicCollisionSlot *dynamic_collision_find(
+    OoTEngine *engine, OoTDynamicCollision handle)
+{
+    uint32_t encodedIndex = handle & 0xFFu;
+    uint32_t generation = handle >> 8;
+    if (encodedIndex == 0u ||
+        encodedIndex > OOT_DYNAMIC_COLLISION_MAX_OBJECTS ||
+        generation == 0u)
+        return NULL;
+    EngineDynamicCollisionSlot *slot =
+        &engine->dynamicCollisions[encodedIndex - 1u];
+    return slot->active && slot->generation == generation ? slot : NULL;
+}
+
 static int finite3(float x, float y, float z)
 {
     return isfinite(x) && isfinite(y) && isfinite(z);
+}
+
+static int host_actor_state_valid(const struct OoTHostActorState *state)
+{
+    return state != NULL && state->structSize >= sizeof(*state) &&
+           state->version == OOT_HOST_ACTOR_STATE_VERSION &&
+           (state->flags & ~ENGINE_KNOWN_HOST_ACTOR_FLAGS) == 0u &&
+           finite3(state->position[0], state->position[1], state->position[2]) &&
+           finite3(state->focusOffset[0], state->focusOffset[1],
+                   state->focusOffset[2]) &&
+           isfinite(state->hurtRadius) && state->hurtRadius >= 0.0f &&
+           isfinite(state->hurtHeight) && state->hurtHeight >= 0.0f &&
+           isfinite(state->hurtYOffset) && state->room >= -1 &&
+           state->room <= INT8_MAX && state->attentionRange < 10u;
 }
 
 static OoTResult input_convert(const OoTEngineInput *input, uint32_t extraButtons,
@@ -375,19 +487,25 @@ static OoTResult engine_tick_locked(OoTEngine *engine, const OoTEngineInput *inp
     }
 
     memset(&nativeState, 0, sizeof(nativeState));
+    memset(&nativeGeometry, 0, sizeof(nativeGeometry));
     nativeGeometry.position = engine->frameStorage.position;
     nativeGeometry.normal = engine->frameStorage.normal;
     nativeGeometry.color = engine->frameStorage.color;
     nativeGeometry.uv = engine->frameStorage.uv;
     nativeGeometry.triTexture = engine->frameStorage.triTexture;
-    nativeGeometry.alpha = engine->frameStorage.alpha;   /* must set: nativeGeometry is not memset */
-    nativeGeometry.triFlags = engine->frameStorage.triFlags; /* must set: nativeGeometry is not memset */
+    nativeGeometry.alpha = engine->frameStorage.alpha;
+    nativeGeometry.triFlags = engine->frameStorage.triFlags;
+    nativeGeometry.triangleCapacity = engine->linkTriangleCapacity;
+    nativeGeometry.batches = engine->frameStorage.batches;
+    nativeGeometry.batchCapacity = engine->linkTriangleCapacity;
     nativeGeometry.numTrianglesUsed = 0u;
 
-    oot_link_tick(0, &nativeInput, &nativeState, &nativeGeometry);
+    oot_link_tick_sized(0, &nativeInput, &nativeState, &nativeGeometry,
+                        (uint32_t)sizeof(nativeGeometry));
     link_state_copy(&engine->frame.link, &nativeState);
     engine->currentAge = nativeState.age;
-    engine->frame.geometry.numTriangles = nativeGeometry.numTrianglesUsed;
+    engine->frame.geometry.numTriangles = nativeGeometry.numTrianglesUsed32;
+    engine->frame.geometryBatchCount = nativeGeometry.numBatchesUsed;
     engine->frame.linkGeometryTruncated =
         oot_link_get_geometry_dropped_triangles() != 0u;
 
@@ -433,6 +551,7 @@ static void scene_geometry_clear(OoTEngine *engine)
 {
     engine->sceneGeometry.numTriangles = 0u;
     engine->sceneGeometry.xluStartTriangle = 0u;
+    engine->sceneGeometry.batchCount = 0u;
     engine->sceneDroppedTriangles = 0u;
     engine->sceneGeometryValid = 0u;
 }
@@ -444,18 +563,32 @@ static OoTResult scene_geometry_copy(OoTEngine *engine)
     const float *color = NULL;
     const float *uv = NULL;
     const uint16_t *triTexture = NULL;
+    const struct OoTGeometryBatch *batches = NULL;
     uint32_t numTriangles = 0u;
     uint32_t xluStart = 0u;
+    uint32_t numBatches = 0u;
 
     scene_geometry_clear(engine);
     if (!oot_scene_get_geometry(&position, &normal, &color, &uv, &triTexture,
                                 &numTriangles, &xluStart)) {
         return OOT_ENGINE_RESULT_SCENE_GEOMETRY_UNAVAILABLE;
     }
-    if (numTriangles > OOT_SCENE_MAX_TRIANGLES || xluStart > numTriangles ||
+    if (numTriangles > engine->sceneTriangleCapacity || xluStart > numTriangles ||
         (numTriangles != 0u && (position == NULL || normal == NULL || color == NULL ||
                                uv == NULL || triTexture == NULL))) {
         return OOT_ENGINE_RESULT_SCENE_GEOMETRY_UNAVAILABLE;
+    }
+    if (!oot_scene_get_geometry_batches(&batches, &numBatches) ||
+        numBatches > numTriangles ||
+        (numBatches != 0u && batches == NULL)) {
+        return OOT_ENGINE_RESULT_SCENE_GEOMETRY_UNAVAILABLE;
+    }
+    for (uint32_t batchIndex = 0u; batchIndex < numBatches; ++batchIndex) {
+        const struct OoTGeometryBatch *batch = &batches[batchIndex];
+        if (batch->numTriangles == 0u || batch->firstTriangle > numTriangles ||
+            batch->numTriangles > numTriangles - batch->firstTriangle) {
+            return OOT_ENGINE_RESULT_SCENE_GEOMETRY_UNAVAILABLE;
+        }
     }
 
     if (numTriangles != 0u) {
@@ -495,9 +628,14 @@ static OoTResult scene_geometry_copy(OoTEngine *engine)
                        (size_t)numTriangles * sizeof(uint8_t));
             }
         }
+        if (numBatches != 0u) {
+            memcpy(engine->sceneStorage.batches, batches,
+                   (size_t)numBatches * sizeof(*batches));
+        }
     }
     engine->sceneGeometry.numTriangles = numTriangles;
     engine->sceneGeometry.xluStartTriangle = xluStart;
+    engine->sceneGeometry.batchCount = numBatches;
     engine->sceneDroppedTriangles = oot_scene_get_geometry_dropped_triangles();
     engine->sceneGeometryValid = 1u;
     return OOT_ENGINE_RESULT_OK;
@@ -510,7 +648,7 @@ uint32_t oot_engine_api_version(void)
 
 OoTResult oot_engine_get_limits(OoTEngineLimits *outLimits)
 {
-    static const uint64_t capabilities =
+    uint64_t capabilities =
         (uint64_t)OOT_ENGINE_CAPABILITY_STATIC_WORLD |
         (uint64_t)OOT_ENGINE_CAPABILITY_ROM_SCENE_LOADING |
         (uint64_t)OOT_ENGINE_CAPABILITY_LINK_GEOMETRY |
@@ -521,7 +659,14 @@ OoTResult oot_engine_get_limits(OoTEngineLimits *outLimits)
         (uint64_t)OOT_ENGINE_CAPABILITY_TEXTURES |
         (uint64_t)OOT_ENGINE_CAPABILITY_FIXED_STEP |
         (uint64_t)OOT_ENGINE_CAPABILITY_AUDIO |
-        (uint64_t)OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON;
+        (uint64_t)OOT_ENGINE_CAPABILITY_DYNAMIC_COLLISION |
+        (uint64_t)OOT_ENGINE_CAPABILITY_GEOMETRY_BATCHES |
+        (uint64_t)OOT_ENGINE_CAPABILITY_HOST_ACTORS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_ACTOR_CATALOG |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_LAYERS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_TRANSITIONS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_BACKGROUNDS |
+        (uint64_t)OOT_ENGINE_CAPABILITY_SCENE_MATERIAL_METADATA;
     OoTEngineLimits limits;
     uint32_t callerSize;
     size_t copySize;
@@ -537,12 +682,27 @@ OoTResult oot_engine_get_limits(OoTEngineLimits *outLimits)
         return OOT_ENGINE_RESULT_API_VERSION;
     }
 
+#if defined(LIBOOT_MULTI_INSTANCE)
+    /* Capability discovery is protected by the same process-wide guard as
+     * engine calls. Reporting a transient third capability state would make
+     * identical queries disagree under contention, so fail without writing
+     * and let the caller retry. */
+    if (!liboot_core_context_lock()) {
+        return OOT_ENGINE_RESULT_BUSY;
+    }
+    if (liboot_core_context_available())
+        capabilities |= (uint64_t)OOT_ENGINE_CAPABILITY_MULTI_INSTANCE;
+    liboot_core_context_unlock();
+#else
+    capabilities |= (uint64_t)OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON;
+#endif
+
     memset(&limits, 0, sizeof(limits));
     limits.structSize = callerSize;
     limits.version = OOT_ENGINE_LIMITS_VERSION;
     limits.capabilityFlags = capabilities;
-    limits.linkTriangleCapacity = OOT_GEO_MAX_TRIANGLES;
-    limits.sceneTriangleCapacity = OOT_SCENE_MAX_TRIANGLES;
+    limits.linkTriangleCapacity = OOT_ENGINE_DEFAULT_LINK_TRIANGLE_CAPACITY;
+    limits.sceneTriangleCapacity = OOT_ENGINE_DEFAULT_SCENE_TRIANGLE_CAPACITY;
     limits.staticSurfaceCapacity = OOT_ENGINE_MAX_STATIC_SURFACES;
     limits.waterBoxCapacity = OOT_ENGINE_MAX_WATER_BOXES;
     limits.maxActorCapacity = OOT_ENGINE_MAX_ACTOR_CAPACITY;
@@ -553,6 +713,8 @@ OoTResult oot_engine_get_limits(OoTEngineLimits *outLimits)
     limits.maxFixedStepSeconds = OOT_ENGINE_MAX_FIXED_STEP_SECONDS;
     limits.defaultFixedStepSeconds = OOT_ENGINE_DEFAULT_FIXED_STEP;
     limits.defaultMaxSubsteps = OOT_ENGINE_DEFAULT_MAX_SUBSTEPS;
+    limits.maxLinkTriangleCapacity = OOT_ENGINE_MAX_GEOMETRY_TRIANGLE_CAPACITY;
+    limits.maxSceneTriangleCapacity = OOT_ENGINE_MAX_GEOMETRY_TRIANGLE_CAPACITY;
 
     copySize = (size_t)callerSize < sizeof(limits)
                    ? (size_t)callerSize : sizeof(limits);
@@ -580,6 +742,14 @@ const char *oot_engine_result_string(OoTResult result)
     case OOT_ENGINE_RESULT_SCENE_GEOMETRY_UNAVAILABLE: return "scene geometry unavailable";
     case OOT_ENGINE_RESULT_NO_FRAME: return "no completed simulation frame";
     case OOT_ENGINE_RESULT_NOT_AVAILABLE: return "resource is not available";
+    case OOT_ENGINE_RESULT_DYNAMIC_COLLISION_CAPACITY:
+        return "dynamic collision capacity reached";
+    case OOT_ENGINE_RESULT_DYNAMIC_COLLISION_NOT_FOUND:
+        return "dynamic collision object was not found";
+    case OOT_ENGINE_RESULT_HOST_ACTOR_CAPACITY:
+        return "host actor capacity reached";
+    case OOT_ENGINE_RESULT_HOST_ACTOR_NOT_FOUND:
+        return "host actor handle is stale or invalid";
     default: return "unknown result";
     }
 }
@@ -606,6 +776,8 @@ OoTResult oot_engine_config_init_sized(OoTEngineConfig *config,
     defaults.actorCapacity = OOT_ENGINE_DEFAULT_ACTOR_CAPACITY;
     defaults.maxSubsteps = OOT_ENGINE_DEFAULT_MAX_SUBSTEPS;
     defaults.fixedStepSeconds = OOT_ENGINE_DEFAULT_FIXED_STEP;
+    defaults.linkTriangleCapacity = OOT_ENGINE_DEFAULT_LINK_TRIANGLE_CAPACITY;
+    defaults.sceneTriangleCapacity = OOT_ENGINE_DEFAULT_SCENE_TRIANGLE_CAPACITY;
     copySize = (size_t)structSize < sizeof(defaults)
                    ? (size_t)structSize : sizeof(defaults);
     memcpy(config, &defaults, copySize);
@@ -647,6 +819,8 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
     uint32_t actorCapacity = OOT_ENGINE_DEFAULT_ACTOR_CAPACITY;
     uint32_t maxSubsteps = OOT_ENGINE_DEFAULT_MAX_SUBSTEPS;
     uint32_t renderFlags = 0u;
+    uint32_t linkTriangleCapacity = OOT_ENGINE_DEFAULT_LINK_TRIANGLE_CAPACITY;
+    uint32_t sceneTriangleCapacity = OOT_ENGINE_DEFAULT_SCENE_TRIANGLE_CAPACITY;
     float fixedStep = OOT_ENGINE_DEFAULT_FIXED_STEP;
 
     if (outEngine == NULL) {
@@ -677,10 +851,20 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
     if (config_has(config, MEMBER_END(OoTEngineConfig, renderFlags))) {
         renderFlags = config->renderFlags;
     }
+    if (config_has(config, MEMBER_END(OoTEngineConfig, linkTriangleCapacity)) &&
+        config->linkTriangleCapacity != 0u) {
+        linkTriangleCapacity = config->linkTriangleCapacity;
+    }
+    if (config_has(config, MEMBER_END(OoTEngineConfig, sceneTriangleCapacity)) &&
+        config->sceneTriangleCapacity != 0u) {
+        sceneTriangleCapacity = config->sceneTriangleCapacity;
+    }
     if (actorCapacity > OOT_ENGINE_MAX_ACTOR_CAPACITY ||
         maxSubsteps > OOT_ENGINE_MAX_SUBSTEPS || !isfinite(fixedStep) ||
         fixedStep < OOT_ENGINE_MIN_FIXED_STEP_SECONDS ||
         fixedStep > OOT_ENGINE_MAX_FIXED_STEP_SECONDS ||
+        linkTriangleCapacity > OOT_ENGINE_MAX_GEOMETRY_TRIANGLE_CAPACITY ||
+        sceneTriangleCapacity > OOT_ENGINE_MAX_GEOMETRY_TRIANGLE_CAPACITY ||
         (renderFlags & ~ENGINE_KNOWN_RENDER_FLAGS) != 0u) {
         return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
     }
@@ -688,10 +872,18 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
     if (!engine_try_guard()) {
         return OOT_ENGINE_RESULT_BUSY;
     }
-    if (atomic_load_explicit(&s_activeEngine, memory_order_acquire) != NULL) {
+#if defined(LIBOOT_MULTI_INSTANCE)
+    if (!liboot_core_context_available() ||
+        !liboot_core_context_activate(NULL)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+#else
+    if (s_activeEngine != NULL) {
         engine_unguard();
         return OOT_ENGINE_RESULT_SINGLETON_IN_USE;
     }
+#endif
 
     engine = (OoTEngine *)calloc(1u, sizeof(*engine));
     if (engine == NULL) {
@@ -700,10 +892,22 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
     }
     engine->magic = ENGINE_MAGIC;
     engine->actorCapacity = actorCapacity;
+    engine->linkTriangleCapacity = linkTriangleCapacity;
+    engine->sceneTriangleCapacity = sceneTriangleCapacity;
     engine->maxSubsteps = maxSubsteps;
     engine->renderFlags = renderFlags;
     engine->fixedStepSeconds = fixedStep;
     engine->currentAge = OOT_AGE_ADULT;
+    s_activeEngine = engine;
+    if (!liboot_core_context_set_thread_owner(engine)) {
+        s_activeEngine = NULL;
+#if defined(LIBOOT_MULTI_INSTANCE)
+        (void)liboot_core_context_activate(NULL);
+#endif
+        engine_free(engine);
+        engine_unguard();
+        return OOT_ENGINE_RESULT_OUT_OF_MEMORY;
+    }
 
     if (config_has(config, MEMBER_END(OoTEngineConfig, debugCallback))) {
         engine->debugCallback = config->debugCallback;
@@ -718,8 +922,12 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
         engine->sfxUserData = config->sfxUserData;
     }
 
-    if (!geometry_storage_allocate(&engine->frameStorage, OOT_GEO_MAX_TRIANGLES) ||
-        !geometry_storage_allocate(&engine->sceneStorage, OOT_SCENE_MAX_TRIANGLES)) {
+    if (!geometry_storage_allocate(&engine->frameStorage, linkTriangleCapacity) ||
+        !geometry_storage_allocate(&engine->sceneStorage, sceneTriangleCapacity)) {
+        s_activeEngine = NULL;
+#if defined(LIBOOT_MULTI_INSTANCE)
+        (void)liboot_core_context_activate(NULL);
+#endif
         engine_free(engine);
         engine_unguard();
         return OOT_ENGINE_RESULT_OUT_OF_MEMORY;
@@ -727,14 +935,18 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
     engine->actorStorage = (struct OoTActorInfo *)calloc(
         (size_t)actorCapacity + 1u, sizeof(*engine->actorStorage));
     if (engine->actorStorage == NULL) {
+        s_activeEngine = NULL;
+#if defined(LIBOOT_MULTI_INSTANCE)
+        (void)liboot_core_context_activate(NULL);
+#endif
         engine_free(engine);
         engine_unguard();
         return OOT_ENGINE_RESULT_OUT_OF_MEMORY;
     }
     frame_views_init(engine);
     targets_invalidate(engine, 0);
+    host_actors_invalidate(engine, 0);
 
-    atomic_store_explicit(&s_activeEngine, engine, memory_order_release);
     oot_set_debug_print_function(engine_debug_trampoline);
     oot_set_sfx_callback(NULL);
     oot_set_sfx_callback_ex(engine_sfx_trampoline);
@@ -744,14 +956,51 @@ OoTResult oot_engine_create(const OoTEngineConfig *config, OoTEngine **outEngine
         oot_set_sfx_callback_ex(NULL);
         oot_set_debug_print_function(NULL);
         oot_global_terminate();
-        atomic_store_explicit(&s_activeEngine, NULL, memory_order_release);
+        s_activeEngine = NULL;
+#if defined(LIBOOT_MULTI_INSTANCE)
+        (void)liboot_core_context_activate(NULL);
+#endif
         engine_free(engine);
         engine_unguard();
         return OOT_ENGINE_RESULT_ROM_UNSUPPORTED;
     }
+    /* Raw host actors are process-global just like the rest of the native
+       core. Defensive clear also covers a previous failed/abrupt lifecycle. */
+    oot_host_actor_clear();
+    if (!oot_scene_set_geometry_capacity(sceneTriangleCapacity)) {
+        oot_set_sfx_callback_ex(NULL);
+        oot_set_debug_print_function(NULL);
+        oot_global_terminate();
+        s_activeEngine = NULL;
+#if defined(LIBOOT_MULTI_INSTANCE)
+        (void)liboot_core_context_activate(NULL);
+#endif
+        engine_free(engine);
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
 
     oot_navi_set_render((renderFlags & OOT_ENGINE_RENDER_NAVI) != 0u);
     oot_actor_set_render((renderFlags & OOT_ENGINE_RENDER_ACTORS) != 0u);
+#if defined(LIBOOT_MULTI_INSTANCE)
+    engine->coreContext = liboot_core_context_capture(engine);
+    if (engine->coreContext == NULL ||
+        !liboot_core_context_adopt(engine->coreContext)) {
+        if (engine->coreContext != NULL) {
+            liboot_core_context_discard(engine->coreContext);
+            engine->coreContext = NULL;
+        }
+        oot_set_sfx_callback_ex(NULL);
+        oot_set_sfx_callback(NULL);
+        oot_set_debug_print_function(NULL);
+        oot_global_terminate();
+        s_activeEngine = NULL;
+        (void)liboot_core_context_activate(NULL);
+        engine_free(engine);
+        engine_unguard();
+        return OOT_ENGINE_RESULT_OUT_OF_MEMORY;
+    }
+#endif
     *outEngine = engine;
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
@@ -766,14 +1015,25 @@ OoTResult oot_engine_destroy(OoTEngine *engine)
 
     if (engine->linkActive) {
         targets_invalidate(engine, 1);
+        host_actors_invalidate(engine, 1);
         oot_link_delete(0);
         engine->linkActive = 0u;
     }
+    oot_host_actor_clear();
     oot_set_sfx_callback_ex(NULL);
     oot_set_sfx_callback(NULL);
     oot_set_debug_print_function(NULL);
     oot_global_terminate();
-    atomic_store_explicit(&s_activeEngine, NULL, memory_order_release);
+#if defined(LIBOOT_MULTI_INSTANCE)
+    {
+        LibootCoreContext *context = engine->coreContext;
+        engine->coreContext = NULL;
+        s_activeEngine = NULL;
+        liboot_core_context_discard(context);
+    }
+#else
+    s_activeEngine = NULL;
+#endif
     engine_free(engine);
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
@@ -838,6 +1098,7 @@ OoTResult oot_engine_link_delete(OoTEngine *engine)
         return result;
     }
     targets_invalidate(engine, 1);
+    host_actors_invalidate(engine, 1);
     oot_link_delete(0);
     engine->linkActive = 0u;
     engine->frameValid = 0u;
@@ -868,6 +1129,7 @@ OoTResult oot_engine_link_set_age(OoTEngine *engine, uint8_t age)
     /* A successful age switch reinitializes Link and despawns every actor,
        including native target slots. */
     targets_invalidate(engine, 0);
+    host_actors_invalidate(engine, 0);
     engine->currentAge = age;
     engine->frameValid = 0u;
     engine->pendingButtons = 0u;
@@ -1192,24 +1454,196 @@ OoTResult oot_engine_static_world_load(OoTEngine *engine,
     return OOT_ENGINE_RESULT_OK;
 }
 
-OoTResult oot_engine_scene_load(OoTEngine *engine, int32_t sceneIndex,
-                                int32_t roomIndex, int32_t *outNativeResult)
+OoTResult oot_engine_dynamic_collision_create(
+    OoTEngine *engine, const struct OoTSurface *surfaces, uint32_t numSurfaces,
+    const struct OoTDynamicCollisionTransform *transform, uint32_t flags,
+    OoTDynamicCollision *outHandle)
 {
-    OoTResult result = engine_lock(engine);
+    OoTResult result;
     int32_t nativeResult;
-    if (outNativeResult != NULL) {
-        *outNativeResult = 0;
+    OoTDynamicCollision nativeHandle = OOT_DYNAMIC_COLLISION_INVALID;
+    uint32_t generation;
+    uint32_t slotIndex;
+    if (outHandle == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
     }
+    *outHandle = OOT_DYNAMIC_COLLISION_INVALID;
+    result = engine_lock(engine);
     if (result != OOT_ENGINE_RESULT_OK) {
         return result;
     }
-    /* roomIndex == -1 is the whole-scene (all rooms) sentinel; only < -1 is invalid. */
-    if (sceneIndex < 0 || roomIndex < -1) {
+    if (!engine->worldLoaded) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    for (slotIndex = 0u; slotIndex < OOT_DYNAMIC_COLLISION_MAX_OBJECTS;
+         ++slotIndex) {
+        if (!engine->dynamicCollisions[slotIndex].active) break;
+    }
+    if (slotIndex == OOT_DYNAMIC_COLLISION_MAX_OBJECTS) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_CAPACITY;
+    }
+    nativeResult = oot_dynamic_collision_create(surfaces, numSurfaces, transform,
+                                                 flags, &nativeHandle);
+    if (nativeResult == 0) {
+        generation = liboot_core_context_next_handle_namespace();
+        if (generation == 0u) {
+            (void)oot_dynamic_collision_delete(nativeHandle);
+            engine_unguard();
+            return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_CAPACITY;
+        }
+        engine->dynamicCollisions[slotIndex].nativeHandle = nativeHandle;
+        engine->dynamicCollisions[slotIndex].generation = generation;
+        engine->dynamicCollisions[slotIndex].active = 1u;
+        *outHandle = dynamic_collision_handle(slotIndex, generation);
+    }
+    engine_unguard();
+    switch (nativeResult) {
+    case 0: return OOT_ENGINE_RESULT_OK;
+    case -2: return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    case -3: return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_CAPACITY;
+    case -4: return OOT_ENGINE_RESULT_OUT_OF_MEMORY;
+    default: return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+OoTResult oot_engine_dynamic_collision_set_transform(
+    OoTEngine *engine, OoTDynamicCollision handle,
+    const struct OoTDynamicCollisionTransform *transform)
+{
+    OoTResult result = engine_lock(engine);
+    EngineDynamicCollisionSlot *slot;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (handle == OOT_DYNAMIC_COLLISION_INVALID || transform == NULL) {
         engine_unguard();
         return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
     }
+    slot = dynamic_collision_find(engine, handle);
+    if (slot == NULL ||
+        !oot_dynamic_collision_set_transform(slot->nativeHandle, transform)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_NOT_FOUND;
+    }
+    engine->frameValid = 0u;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
 
-    nativeResult = oot_scene_load(sceneIndex, roomIndex);
+OoTResult oot_engine_dynamic_collision_set_enabled(
+    OoTEngine *engine, OoTDynamicCollision handle, uint8_t enabled)
+{
+    OoTResult result = engine_lock(engine);
+    EngineDynamicCollisionSlot *slot;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (handle == OOT_DYNAMIC_COLLISION_INVALID) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    slot = dynamic_collision_find(engine, handle);
+    if (slot == NULL ||
+        !oot_dynamic_collision_set_enabled(slot->nativeHandle, enabled != 0u)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_NOT_FOUND;
+    }
+    engine->frameValid = 0u;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_dynamic_collision_get_state(
+    OoTEngine *engine, OoTDynamicCollision handle,
+    struct OoTDynamicCollisionState *outState)
+{
+    OoTResult result;
+    EngineDynamicCollisionSlot *slot;
+    if (outState == NULL ||
+        outState->structSize < sizeof(struct OoTDynamicCollisionState)) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (handle == OOT_DYNAMIC_COLLISION_INVALID) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    slot = dynamic_collision_find(engine, handle);
+    if (slot == NULL ||
+        !oot_dynamic_collision_get_state(slot->nativeHandle, outState)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_NOT_FOUND;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_dynamic_collision_delete(OoTEngine *engine,
+                                               OoTDynamicCollision handle)
+{
+    OoTResult result = engine_lock(engine);
+    EngineDynamicCollisionSlot *slot;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (handle == OOT_DYNAMIC_COLLISION_INVALID) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    slot = dynamic_collision_find(engine, handle);
+    if (slot == NULL || !oot_dynamic_collision_delete(slot->nativeHandle)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_DYNAMIC_COLLISION_NOT_FOUND;
+    }
+    slot->active = 0u;
+    slot->nativeHandle = OOT_DYNAMIC_COLLISION_INVALID;
+    engine->frameValid = 0u;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_load(OoTEngine *engine, int32_t sceneIndex,
+                                int32_t roomIndex, int32_t *outNativeResult)
+{
+    const struct OoTSceneLoadOptions options =
+        OOT_SCENE_LOAD_OPTIONS_INIT(sceneIndex, roomIndex,
+                                    OOT_SCENE_LAYER_CHILD_DAY);
+    return oot_engine_scene_load_ex(engine, &options, outNativeResult);
+}
+
+OoTResult oot_engine_scene_load_ex(
+    OoTEngine *engine, const struct OoTSceneLoadOptions *options,
+    int32_t *outNativeResult)
+{
+    struct OoTSceneLoadOptions optionsCopy;
+    OoTResult result;
+    int32_t nativeResult;
+    if (options == NULL ||
+        options->structSize < sizeof(struct OoTSceneLoadOptions)) {
+        if (outNativeResult != NULL) {
+            *outNativeResult = 0;
+        }
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    optionsCopy = *options;
+    if (outNativeResult != NULL) {
+        *outNativeResult = 0;
+    }
+    if (optionsCopy.sceneIndex < 0 || optionsCopy.roomIndex < -1 ||
+        optionsCopy.layer > OOT_SCENE_LAYER_ADULT_NIGHT) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+
+    nativeResult = oot_scene_load_ex(&optionsCopy);
     if (outNativeResult != NULL) {
         *outNativeResult = nativeResult;
     }
@@ -1229,6 +1663,29 @@ OoTResult oot_engine_scene_load(OoTEngine *engine, int32_t sceneIndex,
     engine->frameValid = 0u;
     engine_unguard();
     return result;
+}
+
+OoTResult oot_engine_scene_get_active_layer(
+    OoTEngine *engine, uint8_t *outLayer, uint8_t *outUsedFallback)
+{
+    OoTResult result;
+    bool usedFallback = false;
+    if (outLayer == NULL || outUsedFallback == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    *outLayer = OOT_SCENE_LAYER_CHILD_DAY;
+    *outUsedFallback = 0u;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!oot_scene_get_active_layer(outLayer, &usedFallback)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    *outUsedFallback = usedFallback ? 1u : 0u;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
 }
 
 OoTResult oot_engine_scene_set_room(OoTEngine *engine, int32_t roomIndex,
@@ -1378,6 +1835,77 @@ OoTResult oot_engine_scene_get_runtime(OoTEngine *engine,
     return OOT_ENGINE_RESULT_OK;
 }
 
+OoTResult oot_engine_scene_get_background_count(OoTEngine *engine,
+                                                uint32_t *outCount)
+{
+    OoTResult result;
+    if (outCount == NULL) return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    *outCount = 0u;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    if (!oot_scene_get_active_layer(NULL, NULL)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    *outCount = (uint32_t)oot_scene_get_background_count();
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_background(OoTEngine *engine, uint32_t index,
+                                          struct OoTSceneBackground *outBackground)
+{
+    OoTResult result;
+    if (outBackground == NULL ||
+        outBackground->structSize < sizeof(*outBackground) ||
+        outBackground->version != OOT_SCENE_BACKGROUND_VERSION)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    if (!oot_scene_get_background((int32_t)index, outBackground)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_material_state(
+    OoTEngine *engine, struct OoTSceneMaterialState *outState)
+{
+    OoTResult result;
+    if (outState == NULL || outState->structSize < sizeof(*outState) ||
+        outState->version != OOT_SCENE_MATERIAL_STATE_VERSION)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    if (!oot_scene_get_material_state(outState)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_material_reference(
+    OoTEngine *engine, uint32_t index,
+    struct OoTSceneMaterialReference *outReference)
+{
+    OoTResult result;
+    if (outReference == NULL ||
+        outReference->structSize < sizeof(*outReference) ||
+        outReference->version != OOT_SCENE_MATERIAL_REFERENCE_VERSION)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    if (!oot_scene_get_material_reference((int32_t)index, outReference)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
 OoTResult oot_engine_scene_get_geometry(OoTEngine *engine,
                                         const OoTEngineSceneGeometry **outGeometry)
 {
@@ -1438,6 +1966,112 @@ OoTResult oot_engine_scene_get_spawn(OoTEngine *engine, int32_t spawnIndex,
     return OOT_ENGINE_RESULT_OK;
 }
 
+OoTResult oot_engine_scene_get_actor_count(OoTEngine *engine, uint32_t *outCount)
+{
+    OoTResult result;
+    int32_t count;
+    if (outCount == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    *outCount = 0u;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!oot_scene_get_active_layer(NULL, NULL)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    count = oot_scene_get_actor_count();
+    *outCount = (uint32_t)count;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_actor(OoTEngine *engine, uint32_t index,
+                                     struct OoTSceneActorEntry *outEntry)
+{
+    OoTResult result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (outEntry == NULL || outEntry->structSize < sizeof(*outEntry) ||
+        outEntry->version != OOT_SCENE_ACTOR_ENTRY_VERSION) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    if (index > INT32_MAX || !oot_scene_get_actor((int32_t)index, outEntry)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_exit_count(OoTEngine *engine,
+                                          uint32_t *outCount)
+{
+    OoTResult result;
+    int32_t count;
+    if (outCount == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    *outCount = 0u;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!oot_scene_get_active_layer(NULL, NULL)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    count = oot_scene_get_exit_count();
+    *outCount = count > 0 ? (uint32_t)count : 0u;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_scene_get_exit(OoTEngine *engine, uint32_t index,
+                                    int16_t *outEntranceIndex)
+{
+    OoTResult result;
+    if (outEntranceIndex == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    *outEntranceIndex = -1;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (index > INT32_MAX ||
+        !oot_scene_get_exit((int32_t)index, outEntranceIndex)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_world_event_poll(OoTEngine *engine,
+                                      struct OoTWorldEvent *outEvent)
+{
+    OoTResult result;
+    if (outEvent == NULL || outEvent->structSize < sizeof(*outEvent) ||
+        outEvent->version != OOT_WORLD_EVENT_VERSION) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!oot_world_event_poll(outEvent)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
 OoTResult oot_engine_target_create(OoTEngine *engine, float x, float y, float z,
                                    float focusHeight, OoTEngineTarget *outTarget)
 {
@@ -1468,11 +2102,15 @@ OoTResult oot_engine_target_create(OoTEngine *engine, float x, float y, float z,
         engine_unguard();
         return OOT_ENGINE_RESULT_TARGET_CAPACITY;
     }
+    engine->targets[i].generation =
+        liboot_core_context_next_handle_namespace();
+    if (engine->targets[i].generation == 0u) {
+        oot_target_remove(nativeId);
+        engine_unguard();
+        return OOT_ENGINE_RESULT_TARGET_CAPACITY;
+    }
     engine->targets[i].nativeId = nativeId;
     engine->targets[i].active = 1u;
-    if (engine->targets[i].generation == 0u) {
-        engine->targets[i].generation = 1u;
-    }
     *outTarget = target_handle(i, engine->targets[i].generation);
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
@@ -1515,10 +2153,6 @@ OoTResult oot_engine_target_remove(OoTEngine *engine, OoTEngineTarget target)
     oot_target_remove(slot->nativeId);
     slot->active = 0u;
     slot->nativeId = -1;
-    slot->generation++;
-    if (slot->generation == 0u || slot->generation > 0xFFFFFFu) {
-        slot->generation = 1u;
-    }
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
 }
@@ -1530,6 +2164,182 @@ OoTResult oot_engine_targets_clear(OoTEngine *engine)
         return result;
     }
     targets_invalidate(engine, 1);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_host_actor_create(OoTEngine *engine,
+                                       const struct OoTHostActorState *state,
+                                       OoTEngineHostActor *outActor)
+{
+    OoTResult result;
+    uint32_t i;
+    int32_t nativeId;
+    if (outActor == NULL || state == NULL) {
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    *outActor = OOT_ENGINE_INVALID_HOST_ACTOR;
+    result = engine_lock_link(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!host_actor_state_valid(state)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    for (i = 0u; i < ENGINE_HOST_ACTOR_SLOTS && engine->hostActors[i].active; ++i) {
+    }
+    if (i == ENGINE_HOST_ACTOR_SLOTS) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_CAPACITY;
+    }
+    nativeId = oot_host_actor_create(state);
+    if (nativeId < 0) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_CAPACITY;
+    }
+    engine->hostActors[i].generation =
+        liboot_core_context_next_handle_namespace();
+    if (engine->hostActors[i].generation == 0u) {
+        (void)oot_host_actor_remove(nativeId);
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_CAPACITY;
+    }
+    engine->hostActors[i].nativeId = nativeId;
+    engine->hostActors[i].active = 1u;
+    *outActor = host_actor_handle(i, engine->hostActors[i].generation);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_host_actor_update(OoTEngine *engine,
+                                       OoTEngineHostActor actor,
+                                       const struct OoTHostActorState *state)
+{
+    OoTResult result = engine_lock_link(engine);
+    EngineHostActorSlot *slot;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (!host_actor_state_valid(state)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    slot = host_actor_find(engine, actor);
+    if (slot == NULL) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_NOT_FOUND;
+    }
+    if (!oot_host_actor_update(slot->nativeId, state)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_host_actor_get(OoTEngine *engine,
+                                    OoTEngineHostActor actor,
+                                    struct OoTHostActorState *outState)
+{
+    OoTResult result = engine_lock_link(engine);
+    EngineHostActorSlot *slot;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (outState == NULL || outState->structSize < sizeof(*outState) ||
+        outState->version != OOT_HOST_ACTOR_STATE_VERSION) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    slot = host_actor_find(engine, actor);
+    if (slot == NULL) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_NOT_FOUND;
+    }
+    if (!oot_host_actor_get(slot->nativeId, outState)) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_NOT_FOUND;
+    }
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_host_actor_remove(OoTEngine *engine,
+                                       OoTEngineHostActor actor)
+{
+    OoTResult result = engine_lock_link(engine);
+    EngineHostActorSlot *slot;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    slot = host_actor_find(engine, actor);
+    if (slot == NULL) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_HOST_ACTOR_NOT_FOUND;
+    }
+    (void)oot_host_actor_remove(slot->nativeId);
+    slot->active = 0u;
+    slot->nativeId = -1;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_host_actors_clear(OoTEngine *engine)
+{
+    OoTResult result = engine_lock_link(engine);
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    host_actors_invalidate(engine, 1);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_host_actor_poll_contact(OoTEngine *engine,
+                                             OoTEngineActorContact *outContact)
+{
+    OoTResult result = engine_lock_link(engine);
+    struct OoTHostActorContact native;
+    uint32_t i;
+    if (result != OOT_ENGINE_RESULT_OK) {
+        return result;
+    }
+    if (outContact == NULL || outContact->structSize < sizeof(*outContact) ||
+        outContact->version != OOT_HOST_ACTOR_CONTACT_VERSION) {
+        engine_unguard();
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    }
+    memset(&native, 0, sizeof(native));
+    native.structSize = sizeof(native);
+    native.version = OOT_HOST_ACTOR_CONTACT_VERSION;
+    for (;;) {
+        if (!oot_host_actor_poll_contact(&native)) {
+            engine_unguard();
+            return OOT_ENGINE_RESULT_NOT_AVAILABLE;
+        }
+        for (i = 0u; i < ENGINE_HOST_ACTOR_SLOTS; ++i) {
+            if (engine->hostActors[i].active &&
+                engine->hostActors[i].nativeId == native.actorId) {
+                break;
+            }
+        }
+        if (i != ENGINE_HOST_ACTOR_SLOTS) {
+            break;
+        }
+        /* Raw and engine lifecycle calls must not be mixed, but if a stale
+           native event is present, skip it instead of hiding later contacts
+           for live engine handles. */
+    }
+    memset(outContact, 0, sizeof(*outContact));
+    outContact->structSize = sizeof(*outContact);
+    outContact->version = OOT_HOST_ACTOR_CONTACT_VERSION;
+    outContact->actor = host_actor_handle(i, engine->hostActors[i].generation);
+    outContact->source = native.source;
+    outContact->userTag = native.userTag;
+    outContact->sourceActorId = native.sourceActorId;
+    outContact->simulationTick = (uint32_t)engine->simulationTick;
+    memcpy(outContact->position, native.position, sizeof(outContact->position));
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
 }
@@ -1677,6 +2487,239 @@ OoTResult oot_engine_ocarina_note_get(OoTEngine *engine, uint8_t noteIndex,
     outPcm->sampleCount = sampleCount;
     outPcm->sampleRate = sampleRate;
     outPcm->loopStart = loopStart;
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+static int audio_player_valid(uint8_t player)
+{
+    return player < OOT_AUDIO_PLAYER_COUNT;
+}
+
+OoTResult oot_engine_audio_sequence_prewarm(OoTEngine *engine,
+                                             uint16_t sequenceId)
+{
+    OoTResult result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    result = oot_audio_sequence_prewarm(sequenceId)
+        ? OOT_ENGINE_RESULT_OK : OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    engine_unguard();
+    return result;
+}
+
+OoTResult oot_engine_audio_sequence_play(OoTEngine *engine, uint8_t player,
+                                          uint16_t sequenceId,
+                                          uint16_t fadeInMs)
+{
+    OoTResult result;
+    if (!audio_player_valid(player)) return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    result = oot_audio_sequence_play(player, sequenceId, fadeInMs)
+        ? OOT_ENGINE_RESULT_OK : OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    engine_unguard();
+    return result;
+}
+
+OoTResult oot_engine_audio_nature_play(OoTEngine *engine, uint8_t player,
+                                        uint8_t ambienceId, uint16_t fadeInMs)
+{
+    OoTResult result;
+    if (!audio_player_valid(player)) return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    result = oot_audio_nature_play(player, ambienceId, fadeInMs)
+        ? OOT_ENGINE_RESULT_OK : OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    engine_unguard();
+    return result;
+}
+
+OoTResult oot_engine_audio_sequence_stop(OoTEngine *engine, uint8_t player,
+                                          uint16_t fadeOutMs)
+{
+    OoTResult result;
+    if (!audio_player_valid(player)) return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_sequence_stop(player, fadeOutMs);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_sequence_pause(OoTEngine *engine, uint8_t player,
+                                           uint8_t paused)
+{
+    OoTResult result;
+    if (!audio_player_valid(player)) return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_sequence_pause(player, paused != 0u);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_sequence_set_volume(OoTEngine *engine,
+                                                uint8_t player, float volume)
+{
+    OoTResult result;
+    if (!audio_player_valid(player) || !isfinite(volume) ||
+        volume < 0.0f || volume > 1.0f)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_sequence_set_volume(player, volume);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_sequence_set_io(OoTEngine *engine, uint8_t player,
+                                            uint8_t port, int8_t value)
+{
+    OoTResult result;
+    if (!audio_player_valid(player) || port >= 8u)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_sequence_set_io(player, port, value);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_channel_set_io(OoTEngine *engine, uint8_t player,
+                                           uint8_t channel, uint8_t port,
+                                           int8_t value)
+{
+    OoTResult result;
+    if (!audio_player_valid(player) || channel >= 16u || port >= 8u)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_channel_set_io(player, channel, port, value);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_sequence_get_state(OoTEngine *engine,
+                                               uint8_t player,
+                                               struct OoTAudioState *outState)
+{
+    OoTResult result;
+    if (!audio_player_valid(player) || outState == NULL ||
+        outState->structSize < sizeof(*outState) ||
+        outState->version != OOT_AUDIO_STATE_VERSION)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    if (!oot_audio_sequence_get_state(player, outState))
+        result = OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    engine_unguard();
+    return result;
+}
+
+OoTResult oot_engine_audio_set_master_volume(OoTEngine *engine, float volume)
+{
+    OoTResult result;
+    if (!isfinite(volume) || volume < 0.0f || volume > 1.0f)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_set_master_volume(volume);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_stop_all(OoTEngine *engine, uint16_t fadeOutMs)
+{
+    OoTResult result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_stop_all(fadeOutMs);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_render_f32(OoTEngine *engine, float *stereo,
+                                      uint32_t frames, uint32_t sampleRate,
+                                      uint32_t *outFrames)
+{
+    OoTResult result;
+    uint32_t rendered;
+    if (outFrames != NULL) *outFrames = 0u;
+    if (stereo == NULL || outFrames == NULL || frames == 0u ||
+        sampleRate < 8000u || sampleRate > 192000u)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    rendered = oot_audio_render_f32(stereo, frames, sampleRate);
+    *outFrames = rendered;
+    engine_unguard();
+    return rendered == frames ? OOT_ENGINE_RESULT_OK
+                              : OOT_ENGINE_RESULT_NOT_AVAILABLE;
+}
+
+OoTResult oot_engine_audio_render_s16(OoTEngine *engine, int16_t *stereo,
+                                      uint32_t frames, uint32_t sampleRate,
+                                      uint32_t *outFrames)
+{
+    OoTResult result;
+    uint32_t rendered;
+    if (outFrames != NULL) *outFrames = 0u;
+    if (stereo == NULL || outFrames == NULL || frames == 0u ||
+        sampleRate < 8000u || sampleRate > 192000u)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    rendered = oot_audio_render_s16(stereo, frames, sampleRate);
+    if (rendered > 0u) *outFrames = rendered;
+    engine_unguard();
+    return rendered == frames ? OOT_ENGINE_RESULT_OK
+                              : OOT_ENGINE_RESULT_NOT_AVAILABLE;
+}
+
+OoTResult oot_engine_audio_sfx_play(OoTEngine *engine, uint16_t sfxId,
+                                     float pan, float volume)
+{
+    OoTResult result;
+    if (!isfinite(pan) || !isfinite(volume) || pan < 0.0f || pan > 1.0f ||
+        volume < 0.0f || volume > 1.0f)
+        return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    result = oot_audio_sfx_play(sfxId, pan, volume)
+        ? OOT_ENGINE_RESULT_OK : OOT_ENGINE_RESULT_NOT_AVAILABLE;
+    engine_unguard();
+    return result;
+}
+
+OoTResult oot_engine_audio_sfx_stop(OoTEngine *engine, uint16_t sfxId)
+{
+    OoTResult result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_sfx_stop(sfxId);
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_audio_sfx_stop_all(OoTEngine *engine)
+{
+    OoTResult result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    oot_audio_sfx_stop_all();
+    engine_unguard();
+    return OOT_ENGINE_RESULT_OK;
+}
+
+OoTResult oot_engine_get_enemy_bgm(OoTEngine *engine, uint8_t *outEnabled,
+                                    uint8_t *outActive, float *outDistance)
+{
+    OoTResult result;
+    bool active = false;
+    bool enabled;
+    if (outEnabled == NULL) return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
+    result = engine_lock(engine);
+    if (result != OOT_ENGINE_RESULT_OK) return result;
+    enabled = oot_audio_get_enemy_bgm(&active, outDistance);
+    *outEnabled = enabled ? 1u : 0u;
+    if (outActive != NULL) *outActive = active ? 1u : 0u;
     engine_unguard();
     return OOT_ENGINE_RESULT_OK;
 }

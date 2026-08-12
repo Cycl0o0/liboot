@@ -70,29 +70,37 @@ target_include_directories(oot
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/decomp/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/decomp/src"
 )
 
 # Keep these definitions in sync with the native Makefile.  They select the
 # ROM layout and compatibility paths expected by the vendored decompilation.
 target_compile_definitions(oot PRIVATE
+    LIBOOT_HOST_BUILD=1
     _LANGUAGE_C
     NON_MATCHING
     AVOID_UB
     DEBUG_FEATURES=0
-    OOT_VERSION=NTSC_1_2
-    OOT_REVISION=2
+    OOT_VERSION=PAL_1_1
+    OOT_REVISION=1
     PLATFORM_N64=1
     PLATFORM_GC=0
     PLATFORM_IQUE=0
     F3DEX_GBI_2
 )
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(oot PRIVATE LIBOOT_MULTI_INSTANCE=1)
+endif()
 
-# Library sources always need exported declarations.  A static Windows target
-# also propagates the macro so its consumers do not treat those declarations
-# as DLL imports; other consumers keep a clean compile interface.
-target_compile_definitions(oot PRIVATE OOT_LIB_EXPORT)
-if(NOT BUILD_SHARED_LIBS AND WIN32)
-    target_compile_definitions(oot INTERFACE OOT_LIB_EXPORT)
+# Shared-library sources export their declarations. Static consumers must not
+# see dllimport on Windows; publish OOT_LIB_STATIC through both CMake and the
+# generated pkg-config metadata.
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(oot PRIVATE OOT_LIB_EXPORT)
+    set(LIBOOT_PC_CFLAGS "")
+else()
+    target_compile_definitions(oot PUBLIC OOT_LIB_STATIC=1)
+    set(LIBOOT_PC_CFLAGS "-DOOT_LIB_STATIC=1")
 endif()
 
 if(MSVC)
@@ -137,6 +145,20 @@ if(NOT WIN32)
     set(LIBOOT_PC_PRIVATE_LIBS "-lm")
 else()
     set(LIBOOT_PC_PRIVATE_LIBS "")
+endif()
+
+# UCRT64's shared libgcc/libwinpthread DLLs are not part of a stock Windows
+# installation. Link the compiler runtime into the DLL so release archives are
+# self-contained without bundling toolchain runtime files and licenses.
+if(MINGW AND BUILD_SHARED_LIBS)
+    target_link_options(oot PRIVATE -static)
+endif()
+
+# ELF multi-instance discovery excludes GNU_RELRO. Bind imports eagerly so a
+# lazy PLT slot cannot mutate outside the saved writable image after context
+# capture. Other platforms do not use the ELF program-header path.
+if(BUILD_SHARED_LIBS AND UNIX AND NOT APPLE)
+    target_link_options(oot PRIVATE -Wl,-z,now)
 endif()
 
 if(BUILD_TESTING)
@@ -197,11 +219,55 @@ if(BUILD_TESTING)
         COMMAND liboot_rom_util_test
     )
 
+    # Header selection is an internal big-endian parser, so exercise it
+    # directly with synthetic scene and room command streams.
+    add_executable(liboot_scene_header_test
+        test/scene_header_test.c
+        src/scene_header.c
+    )
+    liboot_configure_test(liboot_scene_header_test)
+    target_include_directories(liboot_scene_header_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME scene-header-synthetic-inputs
+        COMMAND liboot_scene_header_test
+    )
+
+    add_executable(liboot_scene_room_image_test
+        test/scene_room_image_test.c
+        src/scene_room_image.c
+    )
+    liboot_configure_test(liboot_scene_room_image_test)
+    target_include_directories(liboot_scene_room_image_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME scene-room-image-synthetic-inputs
+        COMMAND liboot_scene_room_image_test
+    )
+
     add_executable(liboot_audio_overflow_test test/audio_overflow_test.c)
     liboot_configure_test(liboot_audio_overflow_test)
     add_test(
         NAME audio-overflow-arithmetic
         COMMAND liboot_audio_overflow_test
+    )
+
+    # The fixed mixer is ROM-independent and has frozen command vectors. Build
+    # the implementation directly so the internal arithmetic is testable even
+    # though it is intentionally not part of the installed ABI.
+    add_executable(liboot_audio_mixer_test
+        test/audio_mixer_test.c
+        src/audio_mixer.c
+    )
+    liboot_configure_test(liboot_audio_mixer_test)
+    target_include_directories(liboot_audio_mixer_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(
+        NAME audio-fixed-mixer-vectors
+        COMMAND liboot_audio_mixer_test
     )
 
     add_executable(liboot_enemy_bgm_test test/enemy_bgm_test.c)
@@ -214,11 +280,44 @@ if(BUILD_TESTING)
 
     add_executable(liboot_engine_limits_test test/engine_limits_test.c)
     liboot_configure_test(liboot_engine_limits_test)
+    if(BUILD_SHARED_LIBS)
+        target_compile_definitions(liboot_engine_limits_test PRIVATE
+            LIBOOT_EXPECT_MULTI_INSTANCE=1
+        )
+    endif()
     target_link_libraries(liboot_engine_limits_test PRIVATE liboot::oot)
     add_test(
         NAME engine-limits-contract
         COMMAND liboot_engine_limits_test
     )
+
+    add_executable(liboot_host_actor_test test/host_actor_test.c)
+    liboot_configure_test(liboot_host_actor_test)
+    target_link_libraries(liboot_host_actor_test PRIVATE liboot::oot)
+    add_test(
+        NAME host-actor-contract
+        COMMAND liboot_host_actor_test
+    )
+
+    # This test needs a user-supplied ROM at runtime, so it is compiled as a
+    # contract probe but is intentionally not registered with CTest.
+    add_executable(liboot_dynamic_collision_test test/dynamic_collision_test.c)
+    liboot_configure_test(liboot_dynamic_collision_test)
+    target_link_libraries(liboot_dynamic_collision_test PRIVATE liboot::oot)
+    if(NOT WIN32)
+        target_link_libraries(liboot_dynamic_collision_test PRIVATE m)
+    endif()
+
+    add_executable(liboot_scene_runtime_test test/scene_runtime_test.c)
+    liboot_configure_test(liboot_scene_runtime_test)
+    target_link_libraries(liboot_scene_runtime_test PRIVATE liboot::oot)
+    if(NOT WIN32)
+        target_link_libraries(liboot_scene_runtime_test PRIVATE m)
+    endif()
+
+    add_executable(liboot_scene_inventory_test test/scene_inventory_test.c)
+    liboot_configure_test(liboot_scene_inventory_test)
+    target_link_libraries(liboot_scene_inventory_test PRIVATE liboot::oot)
 
     find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
     add_test(
@@ -236,6 +335,7 @@ if(BUILD_TESTING)
         add_executable(liboot_collision_mask_test test/collision_mask_test.c)
         liboot_configure_test(liboot_collision_mask_test)
         target_compile_definitions(liboot_collision_mask_test PRIVATE
+            LIBOOT_HOST_BUILD=1
             _LANGUAGE_C
         )
         target_include_directories(liboot_collision_mask_test PRIVATE
@@ -289,6 +389,11 @@ install(
         "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/SECURITY.md"
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot"
+)
+
+install(
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSES/LibUltraShip-MIT.txt"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/liboot/LICENSES"
 )
 
 # Preserve the repository-relative links used by README.md and the guides in

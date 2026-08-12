@@ -2,8 +2,51 @@
   "schema_version": 1,
   "profiles": [
     {
+      "id": "oot-ntsc-us-1.0",
+      "label": "The Legend of Zelda: Ocarina of Time (NTSC-U 1.0)",
+      "canonical_md5": "5bd1fe107bf8106b2ab6650abecd54d6",
+      "size_bytes": 33554432
+    },
+    {
+      "id": "oot-ntsc-jp-1.0",
+      "label": "Zelda no Densetsu: Toki no Ocarina (NTSC-J 1.0)",
+      "canonical_md5": "9f04c8e68534b870f707c247fa4b50fc",
+      "size_bytes": 33554432
+    },
+    {
+      "id": "oot-ntsc-us-1.1",
+      "label": "The Legend of Zelda: Ocarina of Time (NTSC-U 1.1)",
+      "canonical_md5": "721fdcc6f5f34be55c43a807f2a16af4",
+      "size_bytes": 33554432
+    },
+    {
+      "id": "oot-ntsc-jp-1.1",
+      "label": "Zelda no Densetsu: Toki no Ocarina (NTSC-J 1.1)",
+      "canonical_md5": "1bf5f42b98c3e97948f01155f12e2d88",
+      "size_bytes": 33554432
+    },
+    {
+      "id": "oot-ntsc-us-1.2",
+      "label": "The Legend of Zelda: Ocarina of Time (NTSC-U 1.2)",
+      "canonical_md5": "57a9719ad547c516342e1a15d5c28c3d",
+      "size_bytes": 33554432
+    },
+    {
+      "id": "oot-ntsc-jp-1.2",
+      "label": "Zelda no Densetsu: Toki no Ocarina (NTSC-J 1.2)",
+      "canonical_md5": "2258052847bdd056c8406a9ef6427f13",
+      "size_bytes": 33554432
+    },
+    {
+      "id": "oot-pal-1.0",
+      "label": "The Legend of Zelda: Ocarina of Time (PAL 1.0)",
+      "canonical_md5": "e040de91a74b61e3201db0e2323f768a",
+      "size_bytes": 33554432
+    },
+    {
       "id": "oot-pal-1.1",
       "label": "The Legend of Zelda: Ocarina of Time (PAL 1.1)",
+      "canonical_md5": "d714580dd74c2c033f5e1b6dc0aeac77",
       "canonical_sha256": "74f9266fd7fa23cc700b5b46a21fbe99cdc6ea10438bc4b48eeb625763b8611c",
       "size_bytes": 33554432
     }

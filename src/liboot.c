@@ -53,10 +53,18 @@ extern void liboot_gfx_set_lights( const float ambient[3], const float dir0[3],
                                    const float col0[3], const float dir1[3],
                                    const float col1[3], int count );
 extern void liboot_scene_terminate( void );      /* liboot v0.7: scene.c teardown */
+extern void liboot_scene_reset_geometry_capacity( void );
+extern void liboot_world_events_observe_pose( float y );
+extern void liboot_dynamic_collision_begin_tick( void );
+extern void liboot_dynamic_collision_end_tick( void );
+extern void liboot_dynamic_collision_rebind_all( void );
+extern void liboot_dynamic_collision_terminate( void );
+extern void liboot_host_actor_sync_room( void );
 
 extern void liboot_link_init( PlayState *play, Player *player, float x, float y, float z );
 extern void liboot_link_update( PlayState *play, Player *player );
-extern void liboot_render_link( PlayState *play, Player *player, struct OoTLinkGeometryBuffers *out );
+extern void liboot_render_link( PlayState *play, Player *player,
+                                struct OoTLinkGeometryBuffers *out, size_t outSize );
 extern s16 liboot_player_anim_id( const void *animation );
 static void free_player_allocs( Player *player );
 
@@ -277,10 +285,18 @@ void oot_global_init( const uint8_t *rom, size_t romSize, uint8_t *outTexture )
 
 void oot_global_terminate( void )
 {
+    /* Host actors are linked into the native ActorContext and their contact
+       queue is process state. Unlink and clear them before tearing down the
+       Player/play state so a raw lifecycle restart begins with a full pool. */
+    oot_host_actor_clear();
+    /* Dynamic collision owns native Actor/CollisionHeader pointers into the
+       current collision context, so release it before resetting core state. */
+    liboot_dynamic_collision_terminate();
     /* Drop all sequence voices before audio_extract frees their PCM backing. */
     liboot_audio_sequence_reset();
     liboot_audio_terminate();
     liboot_scene_terminate();   /* liboot v0.7: scene blobs, table, collision */
+    liboot_scene_reset_geometry_capacity();
     liboot_gfx_terminate();
     free( s_state.romBlob );
     free( s_state.animBlob );
@@ -321,6 +337,20 @@ static const SurfaceType kOotSurfacePresets[OOT_SURFACE_PRESET_COUNT] = {
                                                      CONVEYOR_SPEED_MEDIUM, 0, 0 ) } },
     [OOT_SURFACE_NO_HOOKSHOT] = { { 0, 0 } },
 };
+
+/* Shared by static and dynamic host collision. Keep exit/void semantics out
+   of host-authored presets until a host transition callback has handled them. */
+void liboot_surface_type_from_preset( uint16_t preset, SurfaceType *out )
+{
+    uint32_t d0;
+    if( out == NULL ) return;
+    if( preset >= OOT_SURFACE_PRESET_COUNT ) preset = OOT_SURFACE_DEFAULT;
+    *out = kOotSurfacePresets[preset];
+    d0 = out->data[0] & ~( 0x1Fu << 8 );
+    if((( d0 >> 26 ) & 0xFu ) == 5u || (( d0 >> 26 ) & 0xFu ) == 12u )
+        d0 &= ~( 0xFu << 26 );
+    out->data[0] = d0;
+}
 
 /* Checked internal form used by the engine-neutral wrapper. Returns 1 on
    success, 0 for invalid/unrepresentable geometry, and -1 on allocation
@@ -381,12 +411,7 @@ int liboot_static_world_load_checked( const struct OoTSurface *surfaces, uint32_
        data[1] = 1u << 17 (hookshot-attachable) exactly. */
     for( uint32_t p = 0; p < OOT_SURFACE_PRESET_COUNT; ++p ) {
         if( presetSlot[p] < 0 ) continue;
-        uint32_t d0 = kOotSurfacePresets[p].data[0];
-        d0 &= ~( 0x1Fu << 8 );                 /* exitIndex */
-        uint32_t floorProp = ( d0 >> 26 ) & 0xF;
-        if( floorProp == 5 || floorProp == 12 ) d0 &= ~( 0xFu << 26 );  /* void */
-        types[presetSlot[p]].data[0] = d0;
-        types[presetSlot[p]].data[1] = kOotSurfacePresets[p].data[1];
+        liboot_surface_type_from_preset((uint16_t)p, &types[presetSlot[p]] );
     }
 
     Vec3s mins = { 32767, 32767, 32767 }, maxs = { -32768, -32768, -32768 };
@@ -523,11 +548,13 @@ int liboot_static_world_load_checked( const struct OoTSurface *surfaces, uint32_
     memset( &play->roomCtx.prevRoom, 0, sizeof( play->roomCtx.prevRoom ));
     play->roomCtx.curRoom.num = 0;
     play->roomCtx.prevRoom.num = -1;
+    liboot_host_actor_sync_room();
     play->msgCtx.disableWarpSongs = 0;
     gSaveContext.worldMapArea = 0;
     liboot_reset_tha(); /* z_bgcheck is the only THA user; drop its old tables */
     BgCheck_Allocate( &play->colCtx, play, &s_state.colHeader );
     liboot_invalidate_actor_bg_cache( play );
+    liboot_dynamic_collision_rebind_all();
 
     /* same rationale as oot_scene_load: a new world is liboot's "scene
        transition" — drop the y < -4000 void-out transitionTrigger latch that
@@ -702,10 +729,11 @@ static uint32_t liboot_action_id( PlayerActionFunc fn )
     return OOT_ACTION_OTHER;
 }
 
-void oot_link_tick( int32_t linkId,
-                    const struct OoTLinkInputs *inputs,
-                    struct OoTLinkState *outState,
-                    struct OoTLinkGeometryBuffers *outBuffers )
+static void link_tick_impl( int32_t linkId,
+                            const struct OoTLinkInputs *inputs,
+                            struct OoTLinkState *outState,
+                            struct OoTLinkGeometryBuffers *outBuffers,
+                            size_t outBuffersSize )
 {
     if( linkId != 0 || !s_state.player || inputs == NULL ) return;
     Player *player = s_state.player;
@@ -744,8 +772,10 @@ void oot_link_tick( int32_t linkId,
 
     /* liboot vNEXT: while frozen, hold the Player pose (skip the update) but
        still report state and rebuild geometry below so a paused Link renders. */
+    liboot_dynamic_collision_begin_tick();
     if( !s_linkFrozen )
         liboot_link_update( play, player );
+    liboot_dynamic_collision_end_tick();
 
     /* liboot vNEXT: proximity-driven battle BGM. The Player update above calls
        Audio_SetBgmEnemyVolume() when a hostile enemy is in battle range; drive
@@ -800,7 +830,30 @@ void oot_link_tick( int32_t linkId,
         outState->underwaterTimer = player->underwaterTimer;
     }
     if( outBuffers )
-        liboot_render_link( play, player, outBuffers );
+        liboot_render_link( play, player, outBuffers, outBuffersSize );
+}
+
+void oot_link_tick( int32_t linkId,
+                    const struct OoTLinkInputs *inputs,
+                    struct OoTLinkState *outState,
+                    struct OoTLinkGeometryBuffers *outBuffers )
+{
+    link_tick_impl( linkId, inputs, outState, outBuffers,
+                    offsetof( struct OoTLinkGeometryBuffers, triangleCapacity ));
+}
+
+void oot_link_tick_sized( int32_t linkId,
+                          const struct OoTLinkInputs *inputs,
+                          struct OoTLinkState *outState,
+                          struct OoTLinkGeometryBuffers *outBuffers,
+                          uint32_t geometryBuffersSize )
+{
+    if( outBuffers != NULL &&
+        geometryBuffersSize < offsetof( struct OoTLinkGeometryBuffers,
+                                        triangleCapacity ))
+        outBuffers = NULL;
+    link_tick_impl( linkId, inputs, outState, outBuffers,
+                    (size_t)geometryBuffersSize );
 }
 
 extern void liboot_despawn_actors( PlayState *play );
@@ -848,6 +901,7 @@ bool oot_link_set_pose( int32_t linkId, float x, float y, float z, int16_t yaw )
     player->actor.home.pos = player->actor.world.pos;
     player->actor.shape.rot.y = yaw;
     player->actor.world.rot.y = yaw;
+    liboot_world_events_observe_pose( y );
     return true;
 }
 

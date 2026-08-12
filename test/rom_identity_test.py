@@ -54,6 +54,7 @@ class RomIdentityTest(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.canonical = synthetic_rom()
         self.digest = hashlib.sha256(self.canonical).hexdigest()
+        self.md5_digest = hashlib.md5(self.canonical).hexdigest()  # nosec B324
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -92,6 +93,7 @@ class RomIdentityTest(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 result = json.loads(completed.stdout)
                 self.assertEqual(result["canonical_sha256"], self.digest)
+                self.assertEqual(result["canonical_md5"], self.md5_digest)
                 self.assertEqual(result["size_bytes"], len(self.canonical))
                 self.assertEqual(result["format"], expected_format)
                 self.assertEqual(result["byte_order"], expected_order)
@@ -107,6 +109,7 @@ class RomIdentityTest(unittest.TestCase):
         completed = self.run_tool(self.write("fixture.z64", self.canonical))
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn(f"Canonical SHA-256: {self.digest}", completed.stdout)
+        self.assertIn(f"Canonical MD5: {self.md5_digest}", completed.stdout)
         self.assertIn("Title: LIBOOT SYNTHETIC", completed.stdout)
         self.assertIn("Game code: NZLE", completed.stdout)
         self.assertIn("Region: North America (E)", completed.stdout)
@@ -180,6 +183,31 @@ class RomIdentityTest(unittest.TestCase):
             result["profile"],
             {"id": "synthetic-rev-2", "label": "Synthetic revision 2"},
         )
+
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "profiles": [
+                        {
+                            "id": "synthetic-md5",
+                            "label": "Synthetic MD5 profile",
+                            "canonical_md5": self.md5_digest,
+                            "size_bytes": len(self.canonical),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        completed = self.run_tool(
+            "--json",
+            "--profiles",
+            profile_path,
+            self.write("fixture.v64", as_v64(self.canonical)),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["profile"]["id"], "synthetic-md5")
 
     def test_malformed_profile_is_safe_error(self) -> None:
         profile_path = self.directory / "profiles.json"

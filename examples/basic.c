@@ -3,7 +3,7 @@
  *
  * Minimal headless liboot host: initialize from a user-provided ROM, create a
  * floor, spawn Link, run one second of input, and inspect renderer-neutral
- * geometry. A real engine performs oot_link_tick at a fixed 20 Hz and uploads
+ * geometry. A host performs oot_link_tick once per PAL 60 ms gameplay tick and uploads
  * changed textures through oot_get_texture().
  */
 #include <errno.h>

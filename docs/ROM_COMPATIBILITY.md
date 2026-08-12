@@ -6,10 +6,16 @@ audio layouts match the compiled decompilation paths.
 
 ## Current matrix
 
-| ROM revision | Accepted byte orders | Validation level | Status |
+| ROM revision | Identity profile | Gameplay validation | Status |
 | --- | --- | --- | --- |
-| PAL Europe Rev 1 (PAL 1.1) | `.z64`, `.v64`, `.n64` | Levels 1–5: identification, initialization, Player, scenes, and audio | Profiled and exercised on 2026-08-12; retail fidelity is pending |
-| Any other retail revision | Parser may accept it | None published | Unsupported until profiled and tested |
+| PAL Europe Rev 1 (PAL 1.1) | SHA-256 and MD5 | Levels 1–5: initialization, Player, scenes, collision, actors, rendering, and audio | Compiled target and exercised revision |
+| PAL Europe 1.0 | MD5 | Identification only | Recognized, not claimed compatible |
+| NTSC-U 1.0, 1.1, 1.2 | MD5 | Identification only | Recognized, not claimed compatible |
+| NTSC-J 1.0, 1.1, 1.2 | MD5 | Identification only | Recognized, not claimed compatible |
+
+All profiles accept canonical `.z64` data and the equivalent byte-swapped
+`.v64` and word-swapped `.n64` forms. A hash match names a ROM revision; it
+does not override the validation column above.
 
 ## PAL 1.1 evidence
 
@@ -22,8 +28,11 @@ The 2026-08-12 maintainer run covered:
 
 - engine initialization, both Link ages, equipment combinations, asset and
   texture extraction, and the checked engine API;
-- the 18 scene presets exposed by the playground, including aggregate-room
-  geometry and a separate 1,000-frame scene walk;
+- scene and room parsing, all four child/adult and day/night header choices,
+  exits and void events, prerender background metadata, aggregate-room
+  geometry, and a separate 1,000-frame scene walk;
+- static and dynamic collision, including a transformed platform carrying
+  Link, plus host actors receiving a native bomb contact;
 - an audio catalog containing 110 sequences, successful prewarming of all 110,
   selected sequencer behavior checks, and all 64 Link voice IDs exercised by
   `voicetest`;
@@ -32,12 +41,13 @@ The 2026-08-12 maintainer run covered:
 
 The local trace is regression evidence only. Retail fidelity remains unclaimed
 until the same scenario passes against a trace exported by the pinned OoT
-reference runtime. This run also does not cover every retail scene, alternate
-header, spawn, or room combination.
+reference runtime. This run does not establish bit-for-bit agreement with the
+N64 renderer, RSP audio microcode, or every possible scene transition.
 
-Gameplay code is compiled with the NTSC 1.2 decompilation configuration even
-when compatible assets are read from PAL 1.1. A successful engine creation only
-proves that the required tables and Link objects were found and parsed.
+Gameplay code is compiled with the PAL 1.1 decompilation configuration. A
+successful engine creation still proves only that the required tables and Link
+objects were found and parsed; the identity profile and validation matrix are
+the compatibility authority.
 
 Public CI contains no ROM and therefore cannot validate either row. It checks
 synthetic parser inputs, ABI behavior, arithmetic bounds, and the trace format.
@@ -46,8 +56,8 @@ synthetic parser inputs, ABI behavior, arithmetic bounds, and the trace format.
 
 A compatibility entry should report each level separately:
 
-1. **Identification:** canonical big-endian SHA-256, game code, region, and
-   revision byte.
+1. **Identification:** canonical big-endian SHA-256 or published MD5, game
+   code, region, and revision byte.
 2. **Initialization:** engine creation, adult/child objects, animations, and
    texture extraction.
 3. **Player:** the headless engine suite for both ages and each supported item.

@@ -20,14 +20,14 @@ Maintained C++ and C# sources live under [`bindings/`](../bindings/).
 
 | Area | Working API | Current boundary |
 | --- | --- | --- |
-| Lifecycle | `oot_engine_create`, `oot_engine_destroy` and `OoTResult` | Opaque checked handle, but the core is still a one-engine/one-Link process singleton |
+| Lifecycle | `oot_engine_create`, `oot_engine_destroy` and `OoTResult` | Shared builds isolate multiple engines; static archives remain single-instance; calls are serialized |
 | Link | Wrapper calls for create/delete, adult/child, equipment, health, magic, damage, items and direct pose/facing | No direct velocity or arbitrary action setter |
 | Timing/input | `oot_engine_step` and capped `oot_engine_advance`; camera-relative stick and button mask | Native gameplay remains one OoT frame per step; the host still owns its camera and input mapping |
-| World | `oot_engine_static_world_load` with triangle collision, surface presets and water boxes | Whole-world replacement only; no dynamic collision objects or arbitrary raw OoT `SurfaceType` payloads |
-| Actors | Frame snapshots for Navi/projectiles plus generation-checked host targets | Not a general OoT actor runtime; target actors have no host-enemy behavior or health |
-| Rendering | Engine-owned world-space geometry, skeleton, Navi state and ROM texture views | Fixed triangle caps; optional actor/Navi meshes share Link's geometry without per-actor ranges |
-| Audio | SFX callback, mapped PCM/Ocarina views, four-player ROM AudioSeq mixer, 110 sequences, 19 nature presets and named 1,259-SFX selector | Host pulls stereo F32 and serializes controls against its callback; synthesis is not bit-exact RSP emulation |
-| Scenes | Checked scene loading, copied room geometry and entrance spawn | Main headers only; no alternate age/day headers, exits, void-out transitions, animated materials or JPEG room backgrounds |
+| World | Static worlds, water boxes, surface queries, and generation-checked transformed dynamic collision | Native dynapoly budget: 50 objects, 512 triangles, and 512 unique local vertices |
+| Actors | Navi/projectile snapshots, scene actor catalogs, and up to 64 host actors with native attention and weapon-contact events | Host actors keep host-owned AI, health, animation, and rendering |
+| Rendering | Configurable engine-owned geometry, skeleton/Navi state, ROM textures, and source/material batches | Host implements GPU resources, draw ordering, shaders, and camera-facing effects |
+| Audio | SFX callback, mapped PCM/Ocarina views, handle-guarded AudioSeq controls, S16/F32 mixing, 110 sequences, 19 nature presets, and a 1,259-SFX selector | Deterministic fixed-point mixer; bit-exact RSP agreement is not claimed |
+| Scenes | Layered scene/room loading, exits and void events, actors, room images, animated-material references, geometry, and spawn/runtime metadata | Host loads destinations, composites backgrounds, and applies material animation on its renderer |
 
 The wrapper exposes the curated high-level `OoTLinkState.action` mapping.
 Unclassified Player action functions report `OOT_ACTION_OTHER`. `animId` is a
@@ -212,19 +212,20 @@ concurrent calls return `OOT_ENGINE_RESULT_BUSY`. If destruction returns
 `OOT_ENGINE_RESULT_BUSY`, wait for the owning call to finish and retry; the
 handle was not destroyed.
 
-Only one `OoTEngine` and one Link may exist in a process. A second creation
-returns `OOT_ENGINE_RESULT_SINGLETON_IN_USE`. This remains true across language
-bindings and engine plugins. Do not call `oot_global_init`,
+Each engine owns one Link. Shared builds advertise `MULTI_INSTANCE` and switch
+an isolated native state image under the guard; static archives advertise
+`PROCESS_SINGLETON` and reject a second engine. Check the capability record in
+code that supports either linkage. Do not call `oot_global_init`,
 `oot_global_terminate`, raw Link lifecycle, or raw callbacks while a wrapper
 handle is active.
 
-## The 20 Hz simulation contract
+## The PAL fixed-step contract
 
 The original Player code advances one game frame per native tick. The default
-wrapper schedule is exactly **20 Hz** (`OOT_ENGINE_DEFAULT_FIXED_STEP`, or
-0.05 seconds). Keep that default for authentic speed.
+wrapper schedule is exactly **3/50 seconds per tick** (60 ms, or 16⅔ Hz), as
+defined by `OOT_ENGINE_DEFAULT_FIXED_STEP`. Keep that default for PAL speed.
 
-- Use `oot_engine_step` when the host already invokes you exactly at 20 Hz. It
+- Use `oot_engine_step` when the host already invokes you every 60 ms. It
   always advances one native tick.
 - Use `oot_engine_advance` from a variable-rate update. It accumulates elapsed
   time, runs at most `config.maxSubsteps` (default 4), and caps excess catch-up
@@ -233,7 +234,7 @@ wrapper schedule is exactly **20 Hz** (`OOT_ENGINE_DEFAULT_FIXED_STEP`, or
 - `config.fixedStepSeconds` changes only the wrapper's wall-clock scheduling
   interval; one native tick still advances one original game frame. The
   accepted nonzero range is `[0.001, 1.0]` seconds, while zero selects the
-  default. Values other than the 0.05-second default intentionally change
+  default. Values other than the 3/50-second default intentionally change
   gameplay speed.
 - `outFrame` may point to the most recently completed frame even when
   `outSteps == 0`; it is null until the first completed tick. Check the result,
@@ -248,7 +249,7 @@ by comparing each tick with the preceding tick. Hold a button high for every
 tick it is held, and supply a later low tick so release actions can run. This
 is especially important for drawing and releasing the bow or hookshot.
 
-A keyboard, gamepad, or UI tap can begin and end between two 20 Hz ticks.
+A keyboard, gamepad, or UI tap can begin and end between two gameplay ticks.
 `oot_engine_advance` latches button bits observed during a no-tick call and
 applies them to the next tick. A host using exact `oot_engine_step` must still
 ensure every short tap is represented by at least one high step and a later
@@ -268,7 +269,7 @@ most adapters never need a second include. Use the raw API directly only for
 an unwrapped feature, an existing integration, or specialized control over
 caller-owned geometry buffers. Raw hosts must provide their own initialization
 failure handling, one-Link ID, buffer allocation, actor queries, target-ID
-invalidation, 20 Hz accumulator and button latching.
+invalidation, PAL fixed-step accumulator and button latching.
 
 The detailed contracts below name the wrapper first and occasionally mention
 the underlying raw call for readers maintaining compatibility code. The
@@ -461,15 +462,14 @@ For each triangle:
 4. Apply host lighting with the supplied world-space normal if desired. Do not
    replace transparent texels with white.
 
-The hard cap is `geometry.triangleCapacity` (currently
-`OOT_GEO_MAX_TRIANGLES`, 2048). Enable `OOT_ENGINE_RENDER_NAVI` and/or
-`OOT_ENGINE_RENDER_ACTORS` in the config or with
-`oot_engine_set_render_flags` to append those meshes to the **same** geometry.
-There are no ranges identifying which actor emitted which triangles, and the
-combined output can reach the cap. Keep these flags off if the integration
-needs Link-only topology, and use frame actor snapshots plus host proxy meshes.
-If `frame->linkGeometryTruncated` is nonzero, the stream hit that cap and is
-incomplete; do not infer truncation merely because the count equals capacity.
+`geometry.triangleCapacity` comes from `config.linkTriangleCapacity`: zero uses
+the 2,048-triangle default, and the supported maximum is 1,048,576. Enable
+`OOT_ENGINE_RENDER_NAVI` and/or `OOT_ENGINE_RENDER_ACTORS` to append those
+meshes to the same geometry arrays. `frame->geometryBatches` splits the arrays
+at source and render-state changes, including a source kind, opaque instance
+token, actor ID, triangle range, texture, blend/depth/cull state, combine words,
+and material colors. If `frame->linkGeometryTruncated` is nonzero, valid output
+was omitted at the configured cap.
 
 Navi's glowing body is deliberately not in the triangle output. When
 `frame->navi.available` is nonzero, draw a camera-facing soft sprite at its
@@ -516,15 +516,16 @@ After `oot_engine_scene_load` succeeds,
 `oot_engine_scene_get_geometry` returns wrapper-owned arrays copied from the
 core, with the same vertex layout and texture cache as Link. Treat the view as
 borrowed and consume it before replacing the world/scene or destroying the
-engine. Its `triangleCapacity` is currently `OOT_SCENE_MAX_TRIANGLES` (16384).
+engine. Its `triangleCapacity` comes from `config.sceneTriangleCapacity` (zero
+uses the 16,384-triangle default; maximum 1,048,576).
 Call `oot_engine_scene_get_dropped_triangles` after retrieving it. A nonzero
 result means the returned scene mesh is a prefix capped at that capacity.
 
-Draw `[0, xluStartTriangle)` as the opaque/cutout pass with depth writes.
-Draw `[xluStartTriangle, numTriangles)` afterwards with source-alpha blending
-and depth writes disabled. Combine texture alpha with the exported scene vertex
-alpha. Scene RGB colors already carry the interpreted material/lighting color,
-so avoid accidentally applying strong lighting twice.
+Prefer `OoTEngineSceneGeometry.batches` for exact per-range source room,
+material, pass, blend, depth, culling, combine modes, and colors. The legacy
+`xluStartTriangle` remains a coarse opaque/translucent split. Combine texture
+alpha with exported vertex alpha. Scene RGB colors already carry interpreted
+material and lighting color, so avoid applying strong lighting twice.
 
 `oot_engine_scene_get_runtime` copies the live `OoTSceneRuntime`; unlike the
 borrowed geometry view, the caller owns this small value. It reports the scene
@@ -618,35 +619,46 @@ valid until `oot_engine_destroy`.
 source PCM but have different sample rates. Play `[0, sampleCount)` once, loop
 `[loopStart, sampleCount)` while held, and fade for roughly 50 ms on release.
 
-The raw audio API also runs OoT's ROM-backed three-level AudioSeq programs. It
-is initialized by `oot_engine_create`/`oot_global_init` and reset at teardown:
+The handle-taking audio API runs OoT's ROM-backed three-level AudioSeq programs
+and selects the correct native context for the supplied engine:
 
 ```c
 /* Startup/control thread, before the real-time device starts. */
 for (uint16_t id = 0; id < OOT_AUDIO_SEQUENCE_COUNT; ++id)
-    oot_audio_sequence_prewarm(id);
+    check(oot_engine_audio_sequence_prewarm(engine, id));
 
 /* Use scene command 0x15 values after a successful scene load. */
-int32_t sequence = oot_scene_get_sequence_id();
-int32_t ambience = oot_scene_get_ambience_id();
+int32_t sequence = -1;
+int32_t ambience = -1;
+check(oot_engine_scene_get_sequence_id(engine, &sequence));
+check(oot_engine_scene_get_ambience_id(engine, &ambience));
 if (sequence >= 0 && sequence < OOT_AUDIO_SEQUENCE_COUNT)
-    oot_audio_sequence_play(OOT_AUDIO_PLAYER_MAIN, (uint16_t)sequence, 250);
+    check(oot_engine_audio_sequence_play(
+        engine, OOT_AUDIO_PLAYER_MAIN, (uint16_t)sequence, 250));
 else if (ambience >= 0 && ambience < OOT_AUDIO_NATURE_COUNT)
-    oot_audio_nature_play(OOT_AUDIO_PLAYER_MAIN, (uint8_t)ambience, 250);
+    check(oot_engine_audio_nature_play(
+        engine, OOT_AUDIO_PLAYER_MAIN, (uint8_t)ambience, 250));
 else
-    oot_audio_sequence_stop(OOT_AUDIO_PLAYER_MAIN, 250);
+    check(oot_engine_audio_sequence_stop(
+        engine, OOT_AUDIO_PLAYER_MAIN, 250));
 
-/* Audio callback: output is overwritten with interleaved stereo F32. */
-oot_audio_render_f32(output, frame_count, sample_rate);
+/* Audio callback: output is overwritten with interleaved stereo S16. */
+uint32_t written = 0;
+OoTResult result = oot_engine_audio_render_s16(
+    engine, output, frame_count, sample_rate, &written);
 ```
 
 Use `oot_audio_sequence_count/name/get_info` for the 110-entry music selector
-and `oot_audio_sfx_catalog_count/get` plus `oot_audio_sfx_play` for all seven
-SFX banks. The four players mirror main BGM, fanfare, SFX and secondary BGM.
-AudioSeq calls and rendering share process-global mutable state; lock the audio
-device around controls and state getters such as `oot_audio_sequence_get_state`.
-The render path allocates nothing. It interprets the retail sequence data and
-samples, but does not claim bit-exact N64 RSP output.
+and `oot_audio_sfx_catalog_count/get` for all seven SFX banks; these catalog
+queries are immutable. Start catalog sounds through `oot_engine_audio_sfx_play`.
+The four players mirror main BGM, fanfare, SFX and secondary BGM. Serialize all
+calls on an engine against its render callback; concurrent calls report
+`OOT_ENGINE_RESULT_BUSY`. Shared builds preserve separate AudioSeq state per
+engine, while calls into the decompiled core are still process-serialized. Raw
+mutable `oot_audio_*` calls have no engine selector and belong only to the raw
+lifecycle. The allocation-free sample path uses fixed-point resampling, gain,
+pan, saturation, and delay reverb. Sequence scheduling and some control-rate
+calculations remain floating point, and bit-exact N64 RSP output is not claimed.
 Nature ambience replaces the MAIN BGM in retail OoT; an environment/time-of-day
 system may switch between the scene BGM and its nature preset, but should not
 automatically layer both.
@@ -750,11 +762,11 @@ if (result.frame != nullptr)
     render(result.frame->geometry);
 ```
 
-Only one `liboot::Engine` may be live, because the RAII class cannot change the
-native singleton limit. Do not retain its returned frame reference or pointer
-after a mutating method. Use `engine.close()` when teardown errors must be
-observed or retried. Never destroy from a callback: the noexcept destructor
-terminates on native teardown failure rather than losing the singleton handle.
+Shared-library builds allow more than one `liboot::Engine`; calls are still
+serialized by the native guard. Static archives allow one. Check the capability
+record when code supports either linkage. Do not retain a returned frame
+reference after a mutating method. Use `engine.close()` when teardown errors
+must be observed or retried, and never destroy from a callback.
 
 ## Unity (C# P/Invoke)
 
@@ -791,7 +803,7 @@ unsafe Result Create(byte[] rom, out IntPtr engine)
 }
 ```
 
-Drive the wrapper accumulator from `Update`; it handles 20 Hz scheduling and
+Drive the wrapper accumulator from `Update`; it handles 60 ms scheduling and
 short-press latching. The returned frame and its arrays are borrowed:
 
 ```csharp
@@ -902,9 +914,9 @@ position while retaining world-space vertices.
 Expose host enemies as Godot nodes paired with `OoTEngineTarget` handles, move
 them before every step, and remove them in `_exit_tree`. Emit copied SFX events
 as deferred signals; create or control `AudioStreamPlayer3D` nodes on the main
-thread. Destroy the `liboot::Engine` owner before the GDExtension/native library
-is unloaded. Centralize that owner rather than letting several scene nodes
-construct competing singleton instances.
+thread. Destroy every `liboot::Engine` owner before the GDExtension/native
+library is unloaded. A central service is still useful for input, audio, and
+asset policy even when a shared build advertises multi-instance support.
 
 ## Unreal Engine 5 (C++)
 
@@ -951,7 +963,7 @@ For a prototype, group triangles by texture and relevant `triFlags` into
 sections of `UProceduralMeshComponent`. Copy vertex shade alpha and set culling,
 masked alpha, and decal depth bias per section. For production, a dynamic
 mesh/Render Hardware Interface path or a texture array avoids rebuilding many
-procedural sections every 50 ms. Create transient `UTexture2D` resources in
+procedural sections every 60 ms. Create transient `UTexture2D` resources in
 `PF_R8G8B8A8`, apply wrap modes, and update when a liboot texture revision
 changes. Keep the scene XLU range in a separate translucent pass.
 
@@ -1054,7 +1066,7 @@ meshes/textures in later systems after releasing the native borrow.
 ## Python (`ctypes`)
 
 Python is useful for tools, automated tests and prototypes. It is not an ideal
-place to rebuild a large render mesh at high frequency, but the 20 Hz native
+place to rebuild a large render mesh at high frequency, but the PAL native
 simulation itself is straightforward. Bind `liboot_engine.h`, not the raw
 buffer API. This minimal `ctypes` example exercises checked creation, world
 loading, accumulation and destruction; generate or mirror the remaining frame
@@ -1207,12 +1219,13 @@ allow exceptions to cross the native boundary.
 
 - [ ] The user supplies a compatible ROM; no ROM data is distributed with the
       game/plugin.
-- [ ] One object owns the sole `OoTEngine`; wrapper and raw lifecycle calls are
-      never mixed.
+- [ ] Each integration object owns exactly one `OoTEngine`; shared-library
+      instances may coexist, while static archives advertise
+      `PROCESS_SINGLETON`. Wrapper and raw lifecycle calls are never mixed.
 - [ ] Every `OoTResult` is checked and translated for the user.
 - [ ] The wrapper API version is checked; `OoTEngineConfig` and every input are
       initialized with the public helper.
-- [ ] Simulation uses `oot_engine_step` at 20 Hz or the capped/latching
+- [ ] Simulation uses `oot_engine_step` every 60 ms or the capped/latching
       `oot_engine_advance` accumulator.
 - [ ] Camera input is normalized camera-to-Link direction in liboot space.
 - [ ] Coordinate conversion and scale are used consistently in both directions.
@@ -1230,8 +1243,9 @@ allow exceptions to cross the native boundary.
 - [ ] Managed callback delegates remain rooted and callback payloads are copied.
 - [ ] PCM is resampled from its reported rate; continuing SFX instances are
       refreshed rather than stacked.
-- [ ] AudioSeq control calls are serialized against `oot_audio_render_f32`;
-      scene ambience uses `oot_audio_nature_play`, not raw sequence 1 alone.
+- [ ] Handle-taking AudioSeq controls are serialized against
+      `oot_engine_audio_render_s16` or `oot_engine_audio_render_f32`; scene
+      ambience uses `oot_engine_audio_nature_play`, not raw sequence 1 alone.
 - [ ] Generation-checked target handles are discarded after Link deletion or
       age changes.
 - [ ] No callback re-enters liboot.

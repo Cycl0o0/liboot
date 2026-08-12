@@ -3,9 +3,11 @@
 #include "liboot.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static float sPos[OOT_GEO_MAX_TRIANGLES * 9];
 static float sNrm[OOT_GEO_MAX_TRIANGLES * 9];
@@ -15,6 +17,116 @@ static uint16_t sTriTex[OOT_GEO_MAX_TRIANGLES];
 static struct OoTLinkGeometryBuffers sGeo = { sPos, sNrm, sCol, sUv, sTriTex, 0 };
 static uint8_t sTextureChecked[512];
 static int sLegacySfxCount, sDetailedSfxCount, sBadSfxEvent;
+
+/* Exact pre-capacity prefix used to verify that oot_link_tick remains safe for
+   binaries compiled against the historical raw geometry structure. */
+struct LegacyLinkGeometryBuffers
+{
+    float *position;
+    float *normal;
+    float *color;
+    float *uv;
+    uint16_t *triTexture;
+    uint16_t numTrianglesUsed;
+    float *alpha;
+    uint8_t *triFlags;
+};
+
+_Static_assert(sizeof(struct LegacyLinkGeometryBuffers) ==
+                   offsetof(struct OoTLinkGeometryBuffers, triangleCapacity),
+               "legacy geometry prefix layout changed");
+
+static int geometry_capacity_and_abi_check( int32_t link )
+{
+    struct OoTLinkInputs input = { .camLookZ = 1.0f };
+    struct OoTLinkState state;
+    float position[10] = { 0 };
+    float normal[10] = { 0 };
+    float color[10] = { 0 };
+    float uv[7] = { 0 };
+    float alpha[4] = { 0 };
+    uint16_t triTexture[2] = { 0, 0xA55Au };
+    uint8_t triFlags[2] = { 0, 0xA5u };
+    struct OoTGeometryBatch batches[2];
+    struct OoTGeometryBatch batchCanary;
+    struct OoTLinkGeometryBuffers geometry = {
+        .position = position,
+        .normal = normal,
+        .color = color,
+        .uv = uv,
+        .triTexture = triTexture,
+        .alpha = alpha,
+        .triFlags = triFlags,
+        .triangleCapacity = 1,
+        .batches = batches,
+        .batchCapacity = 1,
+    };
+    struct {
+        struct LegacyLinkGeometryBuffers geometry;
+        unsigned char canary[32];
+    } legacy;
+    int ok = 1;
+
+    position[9] = 1000001.0f;
+    normal[9] = 1000002.0f;
+    color[9] = 1000003.0f;
+    uv[6] = 1000004.0f;
+    alpha[3] = 1000005.0f;
+    memset( batches, 0, sizeof( batches ));
+    memset( &batches[1], 0xA5, sizeof( batches[1] ));
+    batchCanary = batches[1];
+
+    oot_link_tick_sized( link, &input, &state, &geometry,
+                         (uint32_t)sizeof( geometry ));
+    if( geometry.numTrianglesUsed != 1u ||
+        geometry.numTrianglesUsed32 != 1u ||
+        geometry.numBatchesUsed != 1u ||
+        oot_link_get_geometry_dropped_triangles() == 0u ) {
+        fprintf( stderr,
+                 "capacity-one geometry counts invalid (%u/%u batches=%u dropped=%u)\n",
+                 geometry.numTrianglesUsed, geometry.numTrianglesUsed32,
+                 geometry.numBatchesUsed,
+                 oot_link_get_geometry_dropped_triangles() );
+        ok = 0;
+    } else if( batches[0].firstTriangle != 0u ||
+               batches[0].numTriangles != 1u ||
+               batches[0].sourceKind != OOT_GEOMETRY_SOURCE_LINK ) {
+        fprintf( stderr, "capacity-one geometry batch metadata invalid\n" );
+        ok = 0;
+    }
+    if( position[9] != 1000001.0f || normal[9] != 1000002.0f ||
+        color[9] != 1000003.0f || uv[6] != 1000004.0f ||
+        alpha[3] != 1000005.0f || triTexture[1] != 0xA55Au ||
+        triFlags[1] != 0xA5u ||
+        memcmp( &batches[1], &batchCanary, sizeof( batchCanary )) != 0 ) {
+        fprintf( stderr, "capacity-one geometry wrote beyond caller buffers\n" );
+        ok = 0;
+    }
+
+    memset( &legacy, 0xA5, sizeof( legacy ));
+    legacy.geometry.position = sPos;
+    legacy.geometry.normal = sNrm;
+    legacy.geometry.color = sCol;
+    legacy.geometry.uv = sUv;
+    legacy.geometry.triTexture = sTriTex;
+    legacy.geometry.numTrianglesUsed = 0;
+    legacy.geometry.alpha = NULL;
+    legacy.geometry.triFlags = NULL;
+    oot_link_tick( link, &input, &state,
+                   (struct OoTLinkGeometryBuffers *)&legacy.geometry );
+    if( legacy.geometry.numTrianglesUsed == 0u ) {
+        fprintf( stderr, "legacy geometry prefix emitted no triangles\n" );
+        ok = 0;
+    }
+    for( size_t i = 0; i < sizeof( legacy.canary ); ++i ) {
+        if( legacy.canary[i] != 0xA5u ) {
+            fprintf( stderr, "legacy geometry call wrote into appended fields\n" );
+            ok = 0;
+            break;
+        }
+    }
+    return ok;
+}
 
 static void legacy_sfx( uint16_t sfxId )
 {
@@ -112,7 +224,7 @@ int main( int argc, char **argv )
     oot_set_sfx_callback( legacy_sfx );
     oot_set_sfx_callback_ex( detailed_sfx );
 
-    int ok = 1;
+    int ok = geometry_capacity_and_abi_check( link );
     for( uint8_t age = OOT_AGE_ADULT; age <= OOT_AGE_CHILD; ++age ) {
         if( !oot_link_set_age( link, age )) { ok = 0; continue; }
         uint8_t swordMax = age == OOT_AGE_ADULT ? OOT_SWORD_BIGGORON : OOT_SWORD_KOKIRI;

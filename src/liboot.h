@@ -10,7 +10,9 @@
 #include <stdbool.h>
 
 #if defined(_WIN32)
-    #ifdef OOT_LIB_EXPORT
+    #if defined(OOT_LIB_STATIC)
+        #define OOT_LIB_FN
+    #elif defined(OOT_LIB_EXPORT)
         #define OOT_LIB_FN __declspec(dllexport)
     #else
         #define OOT_LIB_FN __declspec(dllimport)
@@ -182,8 +184,9 @@ struct OoTLinkState
 };
 
 /* Filled per-tick by the display-list interpreter (F3DZEX2 -> triangles).
-   Caller allocates position/normal/color/uv for OOT_GEO_MAX_TRIANGLES*3
-   vertices, 3 floats each (uv: 2 floats). */
+   oot_link_tick retains the historical OOT_GEO_MAX_TRIANGLES allocation;
+   oot_link_tick_sized honors the appended triangleCapacity. Each triangle has
+   3 vertices, 3 floats per position/normal/color vertex and 2 floats per UV. */
 
 /* liboot vNEXT: per-triangle render flags (one uint8_t per triangle, parallel
    to triTexture), decoded from the display list's geometry/other mode so a host
@@ -196,6 +199,71 @@ enum OoTTriangleFlags
     OOT_TRI_CULL_BACK  = 1u << 1,   /* G_CULL_BACK:  cull back-facing  */
     OOT_TRI_ALPHA_TEST = 1u << 2,   /* alpha-compare cutout: discard low-alpha texels */
     OOT_TRI_DECAL      = 1u << 3    /* z-mode decal: depth-bias to avoid z-fighting */
+};
+
+/* A contiguous geometry range sharing one source entity and one render state.
+   `materialKey` is stable for identical interpreter state within a process;
+   `renderMode` preserves the N64 other-mode-low bits for hosts that need more
+   detail than the normalized blend/depth fields. Actor sourceInstance values
+   are opaque lifetime tokens and must never be dereferenced. */
+enum OoTGeometrySourceKind
+{
+    OOT_GEOMETRY_SOURCE_LINK = 0,
+    OOT_GEOMETRY_SOURCE_NAVI = 1,
+    OOT_GEOMETRY_SOURCE_ACTOR = 2,
+    OOT_GEOMETRY_SOURCE_SCENE_ROOM = 3
+};
+
+enum OoTGeometryRenderPass
+{
+    OOT_GEOMETRY_PASS_OPAQUE = 0,
+    OOT_GEOMETRY_PASS_TRANSLUCENT = 1
+};
+
+enum OoTGeometryBlendMode
+{
+    OOT_GEOMETRY_BLEND_OPAQUE = 0,
+    OOT_GEOMETRY_BLEND_ALPHA = 1,
+    OOT_GEOMETRY_BLEND_CUSTOM = 2
+};
+
+enum OoTGeometryDepthMode
+{
+    OOT_GEOMETRY_DEPTH_OPAQUE = 0,
+    OOT_GEOMETRY_DEPTH_INTERPENETRATING = 1,
+    OOT_GEOMETRY_DEPTH_TRANSLUCENT = 2,
+    OOT_GEOMETRY_DEPTH_DECAL = 3
+};
+
+enum OoTGeometryDepthFlags
+{
+    OOT_GEOMETRY_DEPTH_TEST = 1u << 0,
+    OOT_GEOMETRY_DEPTH_WRITE = 1u << 1
+};
+
+struct OoTGeometryBatch
+{
+    uint32_t firstTriangle;
+    uint32_t numTriangles;
+    uint64_t sourceInstance;
+    uint32_t materialKey;
+    uint32_t renderMode;
+    uint16_t textureIndex;       /* 0xFFFF = untextured */
+    int16_t sourceId;            /* actor id or room index; 0 for Link/Navi */
+    uint8_t sourceKind;          /* enum OoTGeometrySourceKind */
+    uint8_t renderPass;          /* enum OoTGeometryRenderPass */
+    uint8_t blendMode;           /* enum OoTGeometryBlendMode */
+    uint8_t depthMode;           /* enum OoTGeometryDepthMode */
+    uint8_t triangleFlags;       /* enum OoTTriangleFlags */
+    uint8_t depthFlags;          /* enum OoTGeometryDepthFlags */
+    uint8_t reserved[2];
+    uint32_t combineModeHi;      /* exact G_SETCOMBINE command word 0 */
+    uint32_t combineModeLo;      /* exact G_SETCOMBINE command word 1 */
+    float primitiveColor[4];
+    float environmentColor[4];
+    float baseColor[3];           /* Link limb/material base tint */
+    float reservedColor;
+    uint32_t reservedTail;
 };
 
 struct OoTLinkGeometryBuffers
@@ -214,6 +282,16 @@ struct OoTLinkGeometryBuffers
        parallel to triTexture. Appended last so existing positional initializers
        leave it NULL; the interpreter writes it only when non-NULL. */
     uint8_t *triFlags;
+    /* Appended capacity/count fields, enabled by oot_link_tick_sized. A zero
+       triangleCapacity retains the historical OOT_GEO_MAX_TRIANGLES default.
+       numTrianglesUsed32 mirrors
+       numTrianglesUsed and is authoritative above UINT16_MAX. Batch storage
+       is optional; at most one batch is needed per emitted triangle. */
+    uint32_t triangleCapacity;
+    uint32_t numTrianglesUsed32;
+    struct OoTGeometryBatch *batches;
+    uint32_t batchCapacity;
+    uint32_t numBatchesUsed;
 };
 
 /* Textures decoded at runtime from the caller's ROM (RGBA32). The count is an
@@ -375,12 +453,21 @@ extern OOT_LIB_FN bool oot_audio_sequence_get_state( uint8_t player,
 extern OOT_LIB_FN void oot_audio_set_master_volume( float volume );
 extern OOT_LIB_FN void oot_audio_stop_all( uint16_t fadeOutMs );
 
-/* Fill interleaved stereo F32 output at any host rate from 8 to 192 kHz.
-   The buffer is overwritten, not accumulated.  Rendering performs no heap
-   allocation; hosts must serialize every call that accesses mutable AudioSeq
-   state (including oot_audio_sequence_get_state) against their audio callback
-   (SDL_LockAudioDevice is sufficient). Returns frames written, or zero for
-   invalid arguments. */
+/* Fill interleaved stereo signed 16-bit PCM at any host rate from 8 to
+   192 kHz. This is the canonical fixed-point render path; the buffer is
+   overwritten, not accumulated. Rendering performs no heap allocation.
+   This portable mixer uses N64-style resampling and command arithmetic but is
+   not a claim of bit-exact RSP emulation. Hosts must serialize every call that
+   accesses mutable AudioSeq state (including oot_audio_sequence_get_state)
+   against their audio callback (SDL_LockAudioDevice is sufficient). Returns
+   frames written, or zero for invalid arguments. */
+extern OOT_LIB_FN uint32_t oot_audio_render_s16( int16_t *stereo,
+                                                 uint32_t frames,
+                                                 uint32_t sampleRate );
+
+/* Fill interleaved stereo F32 by converting the canonical S16 render above.
+   Each sample is exactly s16 / 32768.0f; all state and serialization rules are
+   the same as oot_audio_render_s16. */
 extern OOT_LIB_FN uint32_t oot_audio_render_f32( float *stereo, uint32_t frames,
                                                  uint32_t sampleRate );
 
@@ -448,6 +535,7 @@ extern OOT_LIB_FN bool oot_ocarina_song_notes( int32_t song, uint8_t outNotes[8]
 extern OOT_LIB_FN int32_t oot_ocarina_match( const uint8_t *notes, int32_t count );
 
 #define OOT_GEO_MAX_TRIANGLES 2048
+#define OOT_GEO_MAX_CONFIGURABLE_TRIANGLES 1048576u
 /* Maximum number of live decoded texture slots. Scene reloads can recycle
    slots; revision numbers tell a host when an index's pixels changed. */
 #define OOT_TEXTURE_MAX_COUNT 1024u
@@ -495,6 +583,63 @@ struct OoTWaterBox
 extern OOT_LIB_FN void oot_static_world_load( const struct OoTSurface *surfaces, uint32_t numSurfaces,
                                               const struct OoTWaterBox *waterBoxes, uint32_t numWaterBoxes );
 
+/* Host-owned moving collision. Geometry is expressed in object-local integer
+   coordinates and is transformed by OoTDynamicCollisionTransform. Handles are
+   generation checked, survive static-world/scene replacement, and are rebound
+   to the new native CollisionContext automatically. The retail dynapoly budget
+   is shared by all live objects: at most 50 objects, 512 triangles, and 512
+   unique local vertices. */
+#define OOT_DYNAMIC_COLLISION_MAX_OBJECTS 50u
+#define OOT_DYNAMIC_COLLISION_MAX_SURFACES 512u
+#define OOT_DYNAMIC_COLLISION_MAX_VERTICES 512u
+#define OOT_DYNAMIC_COLLISION_INVALID 0u
+
+typedef uint32_t OoTDynamicCollision;
+
+enum OoTDynamicCollisionFlags
+{
+    OOT_DYNAMIC_COLLISION_CARRY_POSITION = 1u << 0,
+    OOT_DYNAMIC_COLLISION_CARRY_ROTATION_Y = 1u << 1
+};
+
+struct OoTDynamicCollisionTransform
+{
+    uint32_t structSize;
+    float position[3];
+    int16_t rotation[3];       /* binary angles, applied Y-X-Z like OoT */
+    uint16_t reserved;
+    float scale[3];
+};
+
+#define OOT_DYNAMIC_COLLISION_TRANSFORM_INIT \
+    { sizeof(struct OoTDynamicCollisionTransform), { 0.0f, 0.0f, 0.0f }, \
+      { 0, 0, 0 }, 0u, { 1.0f, 1.0f, 1.0f } }
+
+struct OoTDynamicCollisionState
+{
+    uint32_t structSize;
+    struct OoTDynamicCollisionTransform transform;
+    int32_t nativeBgId;        /* diagnostic only; may change after world load */
+    uint8_t enabled;
+    uint8_t playerOnTop;
+    uint8_t playerAbove;
+    uint8_t actorOnTop;
+};
+
+/* Returns 0 on success; -1 invalid input, -2 no collision world, -3 retail
+   dynapoly capacity exhausted, or -4 allocation failure. */
+extern OOT_LIB_FN int32_t oot_dynamic_collision_create(
+    const struct OoTSurface *surfaces, uint32_t numSurfaces,
+    const struct OoTDynamicCollisionTransform *transform, uint32_t flags,
+    OoTDynamicCollision *outHandle );
+extern OOT_LIB_FN bool oot_dynamic_collision_set_transform(
+    OoTDynamicCollision handle, const struct OoTDynamicCollisionTransform *transform );
+extern OOT_LIB_FN bool oot_dynamic_collision_set_enabled(
+    OoTDynamicCollision handle, bool enabled );
+extern OOT_LIB_FN bool oot_dynamic_collision_get_state(
+    OoTDynamicCollision handle, struct OoTDynamicCollisionState *outState );
+extern OOT_LIB_FN bool oot_dynamic_collision_delete( OoTDynamicCollision handle );
+
 /* A static world or ROM scene must be loaded before creating Link because the
    native Player initializer immediately queries the collision context. */
 extern OOT_LIB_FN int32_t oot_link_create( float x, float y, float z );
@@ -502,8 +647,16 @@ extern OOT_LIB_FN void oot_link_tick( int32_t linkId,
                                       const struct OoTLinkInputs *inputs,
                                       struct OoTLinkState *outState,
                                       struct OoTLinkGeometryBuffers *outBuffers );
+/* Capacity-aware form. geometryBuffersSize must be the caller's sizeof of
+   OoTLinkGeometryBuffers; fields beyond that prefix are never read or written.
+   The legacy oot_link_tick intentionally uses the original struct prefix and
+   therefore retains the historical OOT_GEO_MAX_TRIANGLES capacity. */
+extern OOT_LIB_FN void oot_link_tick_sized(
+    int32_t linkId, const struct OoTLinkInputs *inputs,
+    struct OoTLinkState *outState, struct OoTLinkGeometryBuffers *outBuffers,
+    uint32_t geometryBuffersSize );
 /* Number of otherwise valid triangles omitted by the most recent Link
-   geometry walk because OOT_GEO_MAX_TRIANGLES was reached. This includes
+   geometry walk because the caller's triangle capacity was reached. This includes
    optional Navi/actor meshes appended to the same output. */
 extern OOT_LIB_FN uint32_t oot_link_get_geometry_dropped_triangles( void );
 extern OOT_LIB_FN void oot_link_delete( int32_t linkId );
@@ -575,6 +728,78 @@ extern OOT_LIB_FN void oot_target_move( int32_t targetId, float x, float y, floa
 /* Removing a locked target releases the lock through the game's own
    dead-actor paths on the next tick. */
 extern OOT_LIB_FN void oot_target_remove( int32_t targetId );
+
+/* Host-controlled actors -------------------------------------------------
+ *
+ * These actors participate in the native actor/attention lists while their
+ * behavior, health and rendering stay under host control. They do not execute
+ * retail MIPS actor overlays. State is pushed explicitly before a tick and can
+ * be pulled back at any time. The raw integer id is process-local; the engine
+ * wrapper below adds generation-checked handles.
+ */
+#define OOT_HOST_ACTOR_STATE_VERSION 1u
+#define OOT_HOST_ACTOR_CONTACT_VERSION 1u
+#define OOT_HOST_ACTOR_MAX 64u
+
+enum OoTHostActorFlags
+{
+    OOT_HOST_ACTOR_ENABLED    = 1u << 0,
+    OOT_HOST_ACTOR_TARGETABLE = 1u << 1,
+    OOT_HOST_ACTOR_HOSTILE    = 1u << 2,
+    OOT_HOST_ACTOR_HURT       = 1u << 3
+};
+
+enum OoTHostActorContactSource
+{
+    OOT_HOST_CONTACT_MELEE = 1,
+    OOT_HOST_CONTACT_ARROW = 2,
+    OOT_HOST_CONTACT_BOOMERANG = 3,
+    OOT_HOST_CONTACT_HOOKSHOT = 4,
+    OOT_HOST_CONTACT_BOMB = 5
+};
+
+struct OoTHostActorState
+{
+    uint32_t structSize;
+    uint32_t version;
+    uint64_t userTag;
+    uint32_t typeId;              /* host-defined actor/archetype id */
+    uint32_t flags;               /* enum OoTHostActorFlags */
+    float position[3];
+    float focusOffset[3];         /* lock-on/Navi focus relative to position */
+    float hurtRadius;             /* world-space vertical-cylinder radius */
+    float hurtHeight;
+    float hurtYOffset;
+    int16_t rotation[3];          /* OoT binary angles */
+    int16_t room;                 /* -1 persists; otherwise room 0..127 */
+    uint8_t attentionRange;       /* native AttentionRangeType, 0..9 */
+    uint8_t reserved[3];
+};
+
+struct OoTHostActorContact
+{
+    uint32_t structSize;
+    uint32_t version;
+    int32_t actorId;              /* raw host-actor id */
+    uint32_t source;              /* enum OoTHostActorContactSource */
+    uint64_t userTag;
+    uint32_t sourceActorId;       /* native OoT actor id, or ACTOR_PLAYER */
+    uint32_t gameplayFrame;
+    float position[3];
+    uint32_t reserved;
+};
+
+extern OOT_LIB_FN int32_t oot_host_actor_create(
+    const struct OoTHostActorState *state );
+extern OOT_LIB_FN bool oot_host_actor_update(
+    int32_t actorId, const struct OoTHostActorState *state );
+extern OOT_LIB_FN bool oot_host_actor_get(
+    int32_t actorId, struct OoTHostActorState *outState );
+extern OOT_LIB_FN bool oot_host_actor_remove( int32_t actorId );
+extern OOT_LIB_FN void oot_host_actor_clear( void );
+/* Pops the oldest queued contact. Returns false when the queue is empty. */
+extern OOT_LIB_FN bool oot_host_actor_poll_contact(
+    struct OoTHostActorContact *outContact );
 
 /* liboot v0.4: Navi. The real EnElf actor is auto-spawned by the vendored
    Player_Init (its Player_SpawnFairy path) and ticks its real update every
@@ -668,20 +893,22 @@ extern OOT_LIB_FN int32_t oot_actor_spawn( int16_t actorId, float x, float y, fl
    every room's mesh is interpreted and concatenated into one geometry stream
    (opaque triangles for all rooms first, then translucent for all rooms), so a
    full multi-room dungeon renders in a single draw set. Scene collision is
-   whole-scene regardless. Up to OOT_SCENE_MAX_TRIANGLES total; a larger dungeon
-   is truncated at that cap.
+   whole-scene regardless. The raw default is OOT_SCENE_MAX_TRIANGLES; a host
+   can select a larger allocation before loading.
 
-   v1 caveats: main headers only (no child/adult/day/night alternates),
-   scene exits and void-outs are masked off (no exitList in liboot), animated
-   materials (water scroll, segments 8+) keep a static texture state, and
-   prerendered rooms (mesh type 1) render their 3D geometry but not the JPEG
-   background. */
+   oot_scene_load uses the child-day layer; oot_scene_load_ex selects the
+   child/adult and day/night alternate scene and room headers. Exit and void
+   conditions are delivered through oot_world_event_poll. Type-1 room images
+   and unresolved animated-material references are exposed as borrowed source
+   data and metadata; the host still owns image compositing, material animation,
+   and loading a transition's destination. Cutscene header variants are outside
+   the layer-selection contract. */
 /* Every retail scene, straight from the game's own scene table (indices
    0x00..0x64; the 0x65+ debug/test scenes are absent from retail ROMs).
    0x00..0x1A and 0x4F are the dungeons, boss rooms, and Ganon's castle/tower;
    load a full multi-room dungeon with oot_scene_load(index, -1). The loader
-   accepts any of these; individual scenes vary in how completely they render
-   under the v1 caveats above. */
+   accepts any of these; individual scenes still depend on the host-side image,
+   material, actor, and transition responsibilities described above. */
 enum OoTSceneIndex
 {
     OOT_SCENE_DEKU_TREE                      = 0x00,
@@ -792,7 +1019,184 @@ enum OoTSceneIndex
    a memory/capacity knob, not a hard game limit. */
 #define OOT_SCENE_MAX_TRIANGLES 16384
 
+/* Select the allocation used by subsequent raw scene loads. Pass zero for the
+   default. The call is rejected while a ROM scene is active; configure it
+   after oot_global_init and before the first oot_scene_load. */
+extern OOT_LIB_FN bool oot_scene_set_geometry_capacity( uint32_t triangleCapacity );
+
+enum OoTSceneLayer
+{
+    OOT_SCENE_LAYER_CHILD_DAY = 0,
+    OOT_SCENE_LAYER_CHILD_NIGHT = 1,
+    OOT_SCENE_LAYER_ADULT_DAY = 2,
+    OOT_SCENE_LAYER_ADULT_NIGHT = 3
+};
+
+/* Size-tagged scene loader. `layer` selects the matching scene and room
+   alternate headers and sets the active day/night state. It does not recreate
+   a live Link; callers select the matching age separately with
+   oot_link_set_age. Cutscene layers are deliberately outside this contract. */
+struct OoTSceneLoadOptions
+{
+    uint32_t structSize;
+    int32_t sceneIndex;
+    int32_t roomIndex;
+    uint8_t layer;
+    uint8_t reserved[3];
+};
+#define OOT_SCENE_LOAD_OPTIONS_INIT(scene, room, sceneLayer) \
+    { sizeof(struct OoTSceneLoadOptions), (scene), (room), (sceneLayer), { 0u, 0u, 0u } }
+
+extern OOT_LIB_FN int32_t oot_scene_load_ex( const struct OoTSceneLoadOptions *options );
 extern OOT_LIB_FN int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex );
+extern OOT_LIB_FN bool oot_scene_get_active_layer( uint8_t *outLayer,
+                                                    bool *outUsedFallback );
+
+/* Borrowed prerender backgrounds from effective type-1 room shapes. Image and
+   TLUT byte views remain valid until the next scene/room load or global
+   termination. JPEG views contain the original encoded stream from SOI through
+   the validated EOI marker; liboot does not decode them to pixels. Raw views
+   contain exactly width*height at the N64 texel size. cameraIndex is -1 for a
+   single-image room and the retail bg-camera index for a multi-image room. */
+#define OOT_SCENE_BACKGROUND_VERSION 1u
+enum OoTSceneBackgroundEncoding
+{
+    OOT_SCENE_BACKGROUND_NONE = 0,
+    OOT_SCENE_BACKGROUND_RAW = 1,
+    OOT_SCENE_BACKGROUND_JPEG = 2
+};
+struct OoTSceneBackground
+{
+    uint32_t structSize;
+    uint32_t version;
+    int32_t roomIndex;
+    int16_t cameraIndex;
+    uint8_t amountType;       /* RoomShapeImageAmountType: 1 single, 2 multi */
+    uint8_t encoding;         /* enum OoTSceneBackgroundEncoding */
+    uint16_t width;
+    uint16_t height;
+    uint8_t format;           /* raw N64 G_IM_FMT_* value */
+    uint8_t size;             /* raw N64 G_IM_SIZ_* value */
+    uint16_t tlutMode;        /* raw G_TT_* other-mode value */
+    uint16_t tlutCount;       /* number of 16-bit TLUT entries */
+    uint16_t entryFlags;      /* multi-entry unk_00; zero for single */
+    uint32_t sourceAddress;   /* original segmented image address */
+    uint32_t tlutAddress;     /* original segmented TLUT address */
+    uint32_t sourceMetadata;  /* preserved unknown word beside source */
+    const uint8_t *imageBytes;
+    size_t imageByteCount;
+    const uint8_t *tlutBytes;
+    size_t tlutByteCount;
+};
+extern OOT_LIB_FN int32_t oot_scene_get_background_count( void );
+extern OOT_LIB_FN bool oot_scene_get_background(
+    int32_t index, struct OoTSceneBackground *outBackground );
+
+/* Scene draw-config animation contract. The geometry interpreter records every
+   unresolved draw-config segment (8..15) reached by a room display list. A
+   host can key its canonical animation rules by drawConfigId, simulationFrame,
+   segment/address, room, pass, and affected triangle range. Zero-length ranges
+   identify unresolved display lists, vertex streams, or matrices whose geometry
+   or state could not be executed by liboot. Texture-image ranges extend to the
+   next texture-state command or the current root display-list end. */
+#define OOT_SCENE_MATERIAL_STATE_VERSION 1u
+#define OOT_SCENE_MATERIAL_REFERENCE_VERSION 1u
+enum OoTSceneMaterialReferenceKind
+{
+    OOT_SCENE_MATERIAL_DISPLAY_LIST = 1,
+    OOT_SCENE_MATERIAL_TEXTURE_IMAGE = 2,
+    OOT_SCENE_MATERIAL_VERTEX_DATA = 3,
+    OOT_SCENE_MATERIAL_MATRIX = 4
+};
+struct OoTSceneMaterialState
+{
+    uint32_t structSize;
+    uint32_t version;
+    uint64_t simulationFrame;
+    uint32_t referenceCount;
+    uint16_t segmentMask;       /* bit N means segment N was referenced */
+    uint8_t drawConfigId;       /* enum SceneDrawConfig numeric value */
+    uint8_t referencesTruncated;
+    uint8_t reserved[8];
+};
+struct OoTSceneMaterialReference
+{
+    uint32_t structSize;
+    uint32_t version;
+    uint32_t segmentedAddress;
+    uint32_t firstTriangle;
+    uint32_t numTriangles;
+    int16_t roomIndex;
+    uint8_t segment;
+    uint8_t kind;               /* enum OoTSceneMaterialReferenceKind */
+    uint8_t renderPass;         /* enum OoTGeometryRenderPass */
+    uint8_t reserved[3];
+};
+extern OOT_LIB_FN bool oot_scene_get_material_state(
+    struct OoTSceneMaterialState *outState );
+extern OOT_LIB_FN bool oot_scene_get_material_reference(
+    int32_t index, struct OoTSceneMaterialReference *outReference );
+
+/* Effective cmd 0x01 entries after alternate-header selection. Scene actors
+   use room=-1/source=SCENE; room actors identify the source room. These are a
+   ROM spawn catalog for host-side systems, not executable retail overlays. */
+#define OOT_SCENE_ACTOR_ENTRY_VERSION 1u
+enum OoTSceneActorSource
+{
+    OOT_SCENE_ACTOR_SOURCE_SCENE = 0,
+    OOT_SCENE_ACTOR_SOURCE_ROOM = 1
+};
+struct OoTSceneActorEntry
+{
+    uint32_t structSize;
+    uint32_t version;
+    int16_t actorId;
+    int16_t params;
+    float position[3];
+    int16_t rotation[3];
+    int16_t room;
+    uint8_t source;              /* enum OoTSceneActorSource */
+    uint8_t layer;               /* enum OoTSceneLayer */
+    uint16_t reserved;
+};
+extern OOT_LIB_FN int32_t oot_scene_get_actor_count( void );
+extern OOT_LIB_FN bool oot_scene_get_actor(
+    int32_t index, struct OoTSceneActorEntry *outEntry );
+
+/* Exit-list entries referenced by the loaded header's collision surfaces.
+   Exit indices in OoT surfaces are 1-based; this getter uses a conventional
+   zero-based array index and returns the raw entrance-table value. */
+extern OOT_LIB_FN int32_t oot_scene_get_exit_count( void );
+extern OOT_LIB_FN bool oot_scene_get_exit( int32_t index, int16_t *outEntranceIndex );
+
+enum OoTWorldEventKind
+{
+    OOT_WORLD_EVENT_SCENE_EXIT = 1,
+    OOT_WORLD_EVENT_VOID_SURFACE = 2,
+    OOT_WORLD_EVENT_VOID_Y = 3
+};
+
+#define OOT_WORLD_EVENT_VERSION 1u
+struct OoTWorldEvent
+{
+    uint32_t structSize;
+    uint32_t version;
+    uint64_t sequence;
+    uint32_t kind;
+    int32_t sceneIndex;
+    int32_t roomIndex;
+    int16_t exitIndex;       /* raw 1-based surface exit index, or 0 */
+    int16_t entranceIndex;   /* raw entrance-table value, or -1 for voids */
+    uint8_t floorProperty;   /* original unmasked floor property */
+    uint8_t layer;
+    uint16_t reserved;
+    float position[3];
+};
+
+/* Removes the oldest pending host transition event. Events are generated once
+   per continuous contact; polling does not retrigger one until Link leaves and
+   re-enters the exit/void condition. */
+extern OOT_LIB_FN bool oot_world_event_poll( struct OoTWorldEvent *outEvent );
 
 /* liboot vNEXT: room transitions. Swap the loaded scene's active room without
    re-picking the scene — the previous room's mesh is unloaded and roomIndex's
@@ -889,8 +1293,10 @@ extern OOT_LIB_FN bool oot_scene_get_geometry( const float **position, const flo
                                                const float **color, const float **uv,
                                                const uint16_t **triTexture,
                                                uint32_t *numTriangles, uint32_t *xluStartTriangle );
+extern OOT_LIB_FN bool oot_scene_get_geometry_batches(
+    const struct OoTGeometryBatch **batches, uint32_t *numBatches );
 /* Number of otherwise valid triangles omitted by the most recent room-mesh
-   interpretation because OOT_SCENE_MAX_TRIANGLES was reached. Link rendering
+   interpretation because the configured scene capacity was reached. Link rendering
    does not change this value. */
 extern OOT_LIB_FN uint32_t oot_scene_get_geometry_dropped_triangles( void );
 
@@ -911,7 +1317,34 @@ extern OOT_LIB_FN bool oot_scene_spawn( int32_t spawnIndex, float outPos[3], int
    These structures contain no pointers or size_t, so their sizes are identical
    on 32- and 64-bit targets; the exact values are asserted unconditionally. */
 OOT_STATIC_ASSERT(sizeof(struct OoTSurface) == 40, "OoTSurface ABI changed");
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
+OOT_STATIC_ASSERT(sizeof(struct OoTGeometryBatch) == 96,
+                  "OoTGeometryBatch ABI changed (64-bit)");
+OOT_STATIC_ASSERT(offsetof(struct OoTGeometryBatch, primitiveColor) == 44,
+                  "OoTGeometryBatch color offset changed (64-bit)");
+#else
+OOT_STATIC_ASSERT(sizeof(struct OoTGeometryBatch) == 96,
+                  "OoTGeometryBatch ABI changed (32-bit)");
+OOT_STATIC_ASSERT(offsetof(struct OoTGeometryBatch, primitiveColor) == 44,
+                  "OoTGeometryBatch color offset changed (32-bit)");
+#endif
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
+OOT_STATIC_ASSERT(offsetof(struct OoTLinkGeometryBuffers, triangleCapacity) == 64,
+                  "OoTLinkGeometryBuffers stable prefix changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTLinkGeometryBuffers) == 88,
+                  "OoTLinkGeometryBuffers ABI changed (LP64/LLP64)");
+#endif
 OOT_STATIC_ASSERT(sizeof(struct OoTWaterBox) == 10, "OoTWaterBox ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTDynamicCollisionTransform) == 36,
+                  "OoTDynamicCollisionTransform ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTDynamicCollisionState) == 48,
+                  "OoTDynamicCollisionState ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTHostActorState) == 72,
+                  "OoTHostActorState ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTHostActorContact) == 48,
+                  "OoTHostActorContact ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTSceneActorEntry) == 36,
+                  "OoTSceneActorEntry ABI changed");
 OOT_STATIC_ASSERT(sizeof(struct OoTSfxEvent) == 28, "OoTSfxEvent ABI changed");
 OOT_STATIC_ASSERT(sizeof(struct OoTSequenceInfo) == 32, "OoTSequenceInfo ABI changed");
 OOT_STATIC_ASSERT(sizeof(struct OoTAudioState) == 32, "OoTAudioState ABI changed");
@@ -919,6 +1352,17 @@ OOT_STATIC_ASSERT(sizeof(struct OoTSfxInfo) == 64, "OoTSfxInfo ABI changed");
 OOT_STATIC_ASSERT(sizeof(struct OoTActorInfo) == 24, "OoTActorInfo ABI changed");
 OOT_STATIC_ASSERT(sizeof(struct OoTSkeletonPose) == 276, "OoTSkeletonPose ABI changed");
 OOT_STATIC_ASSERT(sizeof(struct OoTSceneRuntime) == 36, "OoTSceneRuntime ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTSceneLoadOptions) == 16,
+                  "OoTSceneLoadOptions ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTWorldEvent) == 48, "OoTWorldEvent ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTSceneMaterialState) == 32,
+                  "OoTSceneMaterialState ABI changed");
+OOT_STATIC_ASSERT(sizeof(struct OoTSceneMaterialReference) == 28,
+                  "OoTSceneMaterialReference ABI changed");
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
+OOT_STATIC_ASSERT(sizeof(struct OoTSceneBackground) == 72,
+                  "OoTSceneBackground ABI changed (LP64/LLP64)");
+#endif
 OOT_STATIC_ASSERT(offsetof(struct OoTSceneRuntime, structSize) == 0,
                   "OoTSceneRuntime.structSize must be first");
 

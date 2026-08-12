@@ -11,6 +11,9 @@ src/overlays/actors/ovl_Arms_Hook/z_arms_hook.c
 src/code/z_player_lib.c
 src/code/z_skelanime.c
 src/code/z_bgcheck.c
+# vNEXT: retail dynamic-platform carry/interaction helpers
+src/code/z_bg_collect.c
+src/code/z_bg_item.c
 src/code/z_actor.c
 src/code/z_lib.c
 src/code/sys_math.c

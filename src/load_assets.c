@@ -36,6 +36,10 @@ extern void Player_Draw( Actor *thisx, PlayState *play );
 #include "z_lib.h"
 extern void Attention_Init( Attention *attention, Actor *actor, PlayState *play );
 extern void Attention_Update( Attention *attention, Player *player, Actor *playerFocusActor, PlayState *play );
+extern void liboot_host_actor_contacts_tick( PlayState *play, Player *player );
+extern void Player_CalcMeleeWeaponTipPositions( Player *player, Vec3f tipPositions[3] );
+extern void Player_UpdateMeleeWeaponInfo( PlayState *play, Player *player,
+                                          Vec3f tipPositions[3] );
 
 /* liboot v0.4: real Navi (vendored EnElf) */
 #include "z_actor_dlftbls.h"
@@ -695,6 +699,22 @@ static void liboot_replicate_draw_attachments( PlayState *play, Player *player )
     }
 }
 
+/* Player normally publishes sword swept segments from the left-hand draw
+   callback. liboot renders through its own display-list walker, so replay the
+   same helper against the posed left-hand matrix before contact detection. */
+static void liboot_replicate_melee_weapon( PlayState *play, Player *player )
+{
+    if( player->meleeWeaponState == 0 ) return;
+    struct OoTSkeletonPose pose;
+    if( !oot_link_get_skeleton_impl( player, &pose ) || pose.numJoints <= 14u )
+        return;
+    Vec3f tipPositions[3];
+    Vec3f hand = { pose.jointPos[14][0], pose.jointPos[14][1], pose.jointPos[14][2] };
+    Matrix_TranslateRotateZYX( &hand, &player->skelAnime.jointTable[15] );
+    Player_CalcMeleeWeaponTipPositions( player, tipPositions );
+    Player_UpdateMeleeWeaponInfo( play, player, tipPositions );
+}
+
 void liboot_link_update( PlayState *play, Player *player )
 {
     AnimTaskQueue_Reset( &play->animTaskQueue );
@@ -732,6 +752,12 @@ void liboot_link_update( PlayState *play, Player *player )
             a = next;
         }
     }
+
+    /* The native collision-check dispatcher is intentionally absent in the
+       host build. Detect contacts against explicit host hurt volumes after
+       all weapon/projectile actors have published their current positions. */
+    liboot_replicate_melee_weapon( play, player );
+    liboot_host_actor_contacts_tick( play, player );
 
     /* liboot v0.3: tail of Actor_UpdateAll (z_actor.c:2525-2539) — reticle
        release + Attention_Update. Runs after Player_Update so next tick's

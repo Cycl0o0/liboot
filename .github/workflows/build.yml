@@ -38,6 +38,7 @@ jobs:
       - name: Verify distributable notices
         run: |
           test -f dist/LICENSE
+          test -f dist/LICENSES/LibUltraShip-MIT.txt
           test -f dist/NOTICE.md
           test -f dist/README.md
           test -f dist/CHANGELOG.md
@@ -118,10 +119,7 @@ jobs:
   cmake:
     name: CMake ${{ matrix.os }} (${{ matrix.kind }})
     runs-on: ${{ matrix.os }}
-    # ubuntu (x86_64/arm64) and macOS are the supported build targets. Windows
-    # is not built yet: the vendored decomp assumes an N64/ILP32 libc (e.g. a
-    # 32-bit size_t in src/decomp/include/libc) that needs a dedicated porting
-    # pass, tracked separately.
+    # Unix jobs use the host compiler; Windows has a dedicated UCRT64 job below.
     strategy:
       fail-fast: false
       matrix:
@@ -206,3 +204,74 @@ jobs:
           test -L "$INSTALL_PREFIX/lib/liboot.so.0.8"
           readelf -d "$INSTALL_PREFIX/lib/liboot.so.0.8.0" \
             | grep -F 'Library soname: [liboot.so.0.8]'
+
+  windows:
+    name: Windows UCRT64 (${{ matrix.kind }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [shared, static]
+    env:
+      INSTALL_SUBDIR: stage/${{ matrix.kind }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            python:p
+            pkgconf:p
+
+      - name: Verify source contracts
+        shell: msys2 {0}
+        run: |
+          tools/check-version.sh
+          python tools/check-vendor.py
+          python tools/check-bindings.py
+
+      - name: Configure
+        shell: msys2 {0}
+        run: |
+          install_prefix="$PWD/$INSTALL_SUBDIR"
+          cmake -S . -B build -G Ninja \
+            -DBUILD_SHARED_LIBS=${{ matrix.kind == 'shared' && 'ON' || 'OFF' }} \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_BINDIR=bin \
+            -DCMAKE_INSTALL_PREFIX="$install_prefix"
+
+      - name: Build and test
+        shell: msys2 {0}
+        run: |
+          cmake --build build --config Release --parallel
+          ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Install and verify consumers
+        shell: msys2 {0}
+        run: |
+          install_prefix="$PWD/$INSTALL_SUBDIR"
+          cmake --install build --config Release
+          export PATH="$install_prefix/bin:$PATH"
+          tools/check-install.sh "$install_prefix"
+
+      - name: Verify exported ABI (shared)
+        if: matrix.kind == 'shared'
+        shell: msys2 {0}
+        run: |
+          install_prefix="$PWD/$INSTALL_SUBDIR"
+          dll="$install_prefix/bin/liboot.dll"
+          RUNNER_OS=Windows tools/check-symbols.sh "$dll"
+          if objdump -p "$dll" | grep -Eiq \
+              'DLL Name:.*(libgcc_s|libwinpthread|libstdc\+\+)'; then
+            echo "liboot.dll imports an unpackaged MinGW runtime DLL" >&2
+            exit 1
+          fi

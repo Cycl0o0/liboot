@@ -665,11 +665,43 @@ int main( int argc, char **argv )
     oot_audio_sfx_stop_all();
     oot_audio_stop_all( 0 );
 
+    /* S16 is the canonical render. Recreate identical state, then require the
+       F32 convenience path to be an exact sample-for-sample conversion even
+       when its internal conversion chunks split this odd-sized callback. */
+    enum { PARITY_FRAMES = 1025 };
+    int16_t canonical[PARITY_FRAMES * 2];
+    float converted[PARITY_FRAMES * 2];
+    oot_global_terminate();
+    oot_global_init( rom, romSize, NULL );
+    assert( oot_audio_sfx_play( 0x4802, 0.0f, 1.0f ));
+    assert( oot_audio_render_s16( canonical, PARITY_FRAMES, 32000 ) ==
+            PARITY_FRAMES );
+    bool canonicalAudible = false;
+    for( size_t i = 0u; i < PARITY_FRAMES * 2u; ++i )
+        canonicalAudible |= canonical[i] != 0;
+    assert( canonicalAudible );
+
+    oot_global_terminate();
+    oot_global_init( rom, romSize, NULL );
+    assert( oot_audio_sfx_play( 0x4802, 0.0f, 1.0f ));
+    assert( oot_audio_render_f32( converted, PARITY_FRAMES, 32000 ) ==
+            PARITY_FRAMES );
+    for( size_t i = 0u; i < PARITY_FRAMES * 2u; ++i )
+        assert( converted[i] == canonical[i] / 32768.0f );
+
     oot_global_terminate();
     /* A post-terminate render is silent and cannot dereference freed PCM. */
     float silent[64 * 2];
+    int16_t silentS16[64 * 2];
+    assert( oot_audio_render_s16( silentS16, 64, 32000 ) == 64 );
+    for( size_t i = 0; i < sizeof( silentS16 ) / sizeof( silentS16[0] ); ++i )
+        assert( silentS16[i] == 0 );
     assert( oot_audio_render_f32( silent, 64, 32000 ) == 64 );
-    for( size_t i = 0; i < sizeof( silent ) / sizeof( silent[0] ); ++i ) assert( silent[i] == 0.0f );
+    for( size_t i = 0; i < sizeof( silent ) / sizeof( silent[0] ); ++i )
+        assert( silent[i] == 0.0f );
+    assert( oot_audio_render_s16( NULL, 64, 32000 ) == 0 );
+    assert( oot_audio_render_s16( silentS16, 64, 7999 ) == 0 );
+    assert( oot_audio_render_s16( silentS16, 64, 192001 ) == 0 );
     free( rom );
     puts( "audio sequence test: PASS" );
     return 0;

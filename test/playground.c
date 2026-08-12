@@ -46,7 +46,7 @@
 #define POOL_FLOOR  (-120)
 #define POOL_RAMP_X 550     /* ramp: y=0 at POOL_X0 down to POOL_FLOOR here */
 #define WATER_Y     (-10)
-#define SIM_DT_MS   50          /* the real game updates gameplay at 20 Hz */
+#define SIM_DT_MS   60          /* PAL gameplay advances one tick per 60 ms */
 #define AUDIO_RATE  48000
 #define PI_F        3.14159265358979323846f
 #define J_L_HAND    15          /* pose joint indices (PLAYER_LIMB_* - 1)   */

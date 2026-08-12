@@ -2,28 +2,28 @@
 
 [![Build](https://github.com/Cycl0o0/liboot/actions/workflows/build.yml/badge.svg)](https://github.com/Cycl0o0/liboot/actions/workflows/build.yml)
 [![License: AGPL v3 or later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange.svg)](#limitations)
+[![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange.svg)](#scope-and-fidelity-boundaries)
 
-liboot embeds Link's *Ocarina of Time* gameplay in another engine. It compiles
-selected Player, collision, animation, actor, and math code from the
+liboot runs selected *Ocarina of Time* gameplay systems inside another engine.
+It compiles Player, collision, animation, actor, scene, and math code from the
 [zeldaret/oot](https://github.com/zeldaret/oot) decompilation into a C11 library,
-then adapts its rendering and audio requests for a host application.
+then exposes host-readable state, geometry, collision, events, and audio.
 
-The host supplies a ROM, controls, collision or a ROM scene, and the rendering
-and audio backends. liboot advances the simulation in fixed ticks (20 Hz by
-default) and returns Link's state, triangle and texture data, actor snapshots,
-and audio output.
+The host supplies a legally obtained PAL 1.1 ROM, controls, a world or ROM
+scene, and rendering and audio devices. The authentic PAL schedule is one
+gameplay tick every 60 ms. Shared-library builds can isolate several engines;
+each engine owns one Link and its native gameplay state.
 
 No ROM or extracted game asset is included. liboot is not an emulator, PC port,
 complete game, or renderer.
 
 ## Try it
 
-You need a C11 compiler, GNU Make or CMake 3.16+, and a legally obtained
-compatible ROM (`.z64`, `.v64`, or `.n64`). Linux and macOS are tested in CI;
-the optional playground also needs SDL2 and OpenGL. ROM-free checks require
-Python 3.8+; pass `-DBUILD_TESTING=OFF` to CMake for a library-only build
-without Python.
+You need a C11 compiler, GNU Make or CMake 3.16+, and a legally obtained PAL
+1.1 ROM (`.z64`, `.v64`, or `.n64`). CI builds Linux, macOS, and Windows
+UCRT64 artifacts. The optional playground also needs SDL2 and OpenGL. ROM-free
+checks require Python 3.8+; pass `-DBUILD_TESTING=OFF` to CMake for a
+library-only build without Python.
 
 ```sh
 make
@@ -60,27 +60,28 @@ Set `-DBUILD_SHARED_LIBS=OFF` for a static library.
 | The host owns | liboot supplies |
 | --- | --- |
 | ROM selection and storage | ROM validation, byte-order handling, DMADATA lookup, Yaz0 decompression, and runtime asset binding |
-| Input and camera direction | One Player update per fixed tick (20 Hz by default), including movement, equipment, items, health, magic, and targeting |
-| Static collision or scene selection | OoT floor, wall, ceiling, water, and raycast handling; room state, door metadata, and host-requested room swaps |
-| GPU resources and draw submission | Renderer-independent triangles, UVs, shade color/alpha, texture views, and render flags |
-| Audio device and scheduling | SFX events, decoded voice and instrument samples, and interleaved stereo F32 sequence mixing |
-| Game-specific enemies and rules | Link, Navi, selected projectile actors, and snapshots of supported actors |
+| Input and camera direction | Player updates, equipment, items, health, magic, targeting, and a fixed-step accumulator |
+| Static world, moving objects, or scene selection | Floor, wall, ceiling, water, raycasts, dynamic collision, room state, and transition events |
+| GPU resources and draw submission | Triangles, textures, source/material batches, render state, room images, and animated-material references |
+| Audio device and scheduling | SFX events, decoded samples, and portable interleaved stereo mixing |
+| Enemy AI, health, and game rules | Native attention entries, arbitrary host actor records, scene actor catalogs, and weapon-contact events |
 
 Borrowed frame and texture pointers are short-lived. Upload or copy their data
-before the next mutating call. Serialize engine/gameplay calls on one thread,
-and do not re-enter the library from callbacks. The raw AudioSeq control and
-render calls may use an audio thread when the host locks their shared state.
+before the next mutating call. Serialize calls that use an `OoTEngine`, including
+audio rendering, and do not re-enter the library from callbacks. Raw AudioSeq
+controls belong to the raw lifecycle and have no engine selector.
 
 ## Current capabilities
 
 | Area | Available now |
 | --- | --- |
 | Player | Adult and child movement, fidget states, equipment, usable items, damage, health, magic, swimming, diving, iron boots, and the underwater timer |
-| Items and actors | Swords, shields, tunics, boots, Ocarina input, arrows, bombs, hookshot, boomerang, Navi, and host-owned Z-targets |
-| World | Host triangle collision and water boxes; ROM scene collision, geometry, spawn points, rooms, doors, music, ambience, lighting, and fog metadata |
-| Rendering | Link, Navi, projectile, and room geometry; RGBA texture decoding; per-vertex alpha and per-triangle cull, alpha-test, and decal flags |
-| Audio | Engine API: parameterized SFX callbacks and voice/Ocarina PCM views. Raw API: 110 ROM sequences, four sequence players, 38 soundfonts, seven sample banks, 19 nature presets, and a 1,259-entry SFX catalog. |
-| Integration | C ABI, C++11 RAII wrapper, C# P/Invoke binding, CMake package metadata, and `pkg-config` metadata |
+| Items and actors | Swords, shields, tunics, boots, Ocarina input, arrows, bombs, hookshot, boomerang, Navi, scene actor entries, and up to 64 host-controlled actors with attention and hit contacts |
+| World | Host static collision, water boxes, and transformed dynamic collision objects; ROM scene collision, rooms, doors, spawn points, exits, void-out events, music, ambience, lighting, and fog |
+| Scenes | Child/adult and day/night headers, explicit layer selection, room swaps, scene transition events, prerender-image records, and animated-material references |
+| Rendering | Configurable Link and scene buffers; Link, Navi, projectile, actor, and room source ranges; material, texture, pass, blend, depth, cull, alpha-test, combine-mode, and color metadata |
+| Audio | Parameterized SFX callbacks, voice/Ocarina PCM, 110 ROM sequences, four sequence players, 38 soundfonts, seven sample banks, 19 nature presets, and a 1,259-entry SFX catalog |
+| Integration | C ABI, C++11 RAII, C# P/Invoke, CMake and `pkg-config` packages, Linux/macOS shared libraries, and Windows UCRT64 DLLs |
 
 The public headers define the exact contracts and limits. See the
 [API reference](docs/API_REFERENCE.md) for the exported surface.
@@ -90,7 +91,7 @@ The public headers define the exact contracts and limits. See the
 | API | Use it for |
 | --- | --- |
 | [`liboot_engine.h`](src/liboot_engine.h) | New integrations. It provides an opaque owner, result codes, size-tagged inputs, engine-owned frame buffers, and fixed or accumulated stepping. |
-| [`liboot.h`](src/liboot.h) | Existing integrations or features not yet exposed by the engine API, including direct AudioSeq control, the SFX catalog, Ocarina tables, the direct skeleton-pose getter, and actor spawning. |
+| [`liboot.h`](src/liboot.h) | Existing raw-lifecycle integrations and low-level helpers, including immutable audio catalogs, Ocarina tables, the direct skeleton-pose getter, and actor spawning. |
 
 Only one API may own the process lifecycle at a time. Do not mix raw lifecycle
 calls with an active `OoTEngine`.
@@ -166,29 +167,30 @@ regression between liboot builds:
 A liboot-generated trace is not proof of agreement with retail OoT. The
 [fidelity guide](docs/FIDELITY.md) explains the distinction.
 
-## Limitations
+## Scope and fidelity boundaries
 
-- The decompilation core is process-global: one engine and one Link may exist in
-  a process.
-- PAL 1.1 is the currently exercised ROM revision. Gameplay code is compiled
-  from the NTSC 1.2 decompilation paths, so other ROM revisions are not claimed
-  compatible.
-- Static host collision is replaced as one world; dynamic collision objects are
-  not supported.
-- The actor support is limited to Link, Navi, selected projectiles, and
-  host-provided targeting. This is not a general enemy or actor runtime.
-- Scene loading handles main headers and rooms, but not alternate age/day
-  headers, exits, void-out transitions, animated materials, or prerendered JPEG
-  backgrounds.
-- Link and actor geometry uses fixed capacities and has no source-entity or
-  material ranges. Scene geometry exposes one opaque/translucent split, not
-  per-batch material, blend, or depth metadata.
-- The audio mixer is a native approximation, not bit-exact N64 RSP emulation.
-- Windows is not currently a supported build or release target.
-
-The [roadmap](docs/UNIVERSAL_SDK.md#roadmap) covers context isolation, ROM
-profiles, richer draw batches, host callbacks, audio fidelity, and packaged
-engine integrations.
+- PAL 1.1 is the compiled and ROM-backed tested revision. The ROM identifier
+  recognizes all eight N64 retail region/revision hashes, but recognition is
+  not a gameplay-compatibility claim.
+- Shared libraries isolate writable decompilation state per `OoTEngine`.
+  Static archives are still single-instance because their writable sections
+  are linked into the host executable. The raw lifecycle API remains
+  process-global and must not be mixed with active engine owners.
+- Host actors participate in attention, room filtering, targeting, and Link or
+  projectile contact detection. Their AI, health, animation, and rendering are
+  host-owned; liboot does not execute arbitrary retail actor overlays.
+- Scene exit and void events are reported to the host. Loading the destination
+  scene, choosing a spawn, and applying game-specific save rules remain host
+  responsibilities. Cutscene header variants are not selected automatically.
+- Room-image and animated-material APIs expose validated source data and render
+  metadata. Hosts still own camera compositing and GPU-side material animation.
+- The sample-mixing stage uses fixed-point resampling, gain, pan, saturation,
+  and delay reverb, with canonical S16 output and exact F32 conversion.
+  Sequence timing, envelope targets, fades, portamento, and procedural
+  oscillators still use floating-point control logic. Output has not been
+  verified as bit-exact N64 RSP microcode emulation.
+- Windows support targets x86-64 MSYS2 UCRT64/MinGW. An MSVC build is not part
+  of the release matrix.
 
 ## License and provenance
 

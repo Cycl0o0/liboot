@@ -27,9 +27,13 @@ integration patches are marked in the source with `liboot` comments where
 practical.
 
 The vendored subtree includes local integration changes in
-`include/segmented_address.h`, `include/ultra64/gbi.h`,
-`include/ultra64/libc.h`, `include/ultra64/ultratypes.h`,
-`src/code/sys_matrix.c`, and `src/code/z_actor.c`.
+`include/libc/stddef.h`, `include/libc/stdint.h`,
+`include/segmented_address.h`, `include/ultra64/controller.h`,
+`include/ultra64/gbi.h`, `include/ultra64/libc.h`,
+`include/ultra64/ultratypes.h`, `src/code/sys_matrix.c`, and
+`src/code/z_actor.c`, plus
+`src/overlays/actors/ovl_player_actor/z_player.c`. The unmodified upstream dynamic-collision helpers
+`src/code/z_bg_collect.c` and `src/code/z_bg_item.c` are also included.
 
 The following liboot-authored placeholder headers are stored under that subtree
 only because upstream include paths require those locations. They are original
@@ -53,3 +57,14 @@ or sponsored by Nintendo.
 The architecture is inspired by the public
 [libsm64](https://github.com/libsm64/libsm64) project; liboot does not include
 libsm64 source code.
+
+## LibUltraShip audio mixer arithmetic
+
+`src/audio_mixer.c` adapts the N64 ABI four-tap resampling coefficients and
+fixed-point command arithmetic from the portable LibUltraShip mixer authored
+by Kenix3 and later moved into Ship of Harkinian in commit
+`2e4a19c0ee120870ef34e3f211e15ca51461b2b2`. That material is available
+under the MIT License; its notice is reproduced in
+`LICENSES/LibUltraShip-MIT.txt`. liboot's sequence runtime and the surrounding
+cursor, ramp, pan, saturation, and reverb integration are separate work. This
+does not claim that liboot executes a retail RSP command stream bit-for-bit.

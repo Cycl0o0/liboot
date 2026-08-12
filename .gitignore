@@ -25,8 +25,15 @@ compile_commands.json
 /test/audio_overflow_test
 /test/audio_catalog_test
 /test/audio_sequence_test
+/test/audio_mixer_test
 /test/enemy_bgm_test
 /test/engine_limits_test
+/test/dynamic_collision_test
+/test/host_actor_test
+/test/scene_header_test
+/test/scene_inventory_test
+/test/scene_room_image_test
+/test/scene_runtime_test
 /test/fidelity_runner
 /test/playground
 /examples/basic

@@ -12,10 +12,11 @@ OPENGL_LIBS      := -lGL
 LIBRARY_PATH_ENV := LD_LIBRARY_PATH=../dist
 endif
 
-ROM_FREE_TESTS := engine_init_test rom_util_test audio_overflow_test \
-		  enemy_bgm_test engine_limits_test fidelity_runner
+ROM_FREE_TESTS := engine_init_test rom_util_test scene_header_test scene_room_image_test audio_overflow_test audio_mixer_test \
+		  enemy_bgm_test engine_limits_test host_actor_test fidelity_runner
 ROM_BACKED_TESTS := headless equip_test voicetest asset_test engine_api_test \
-		    audio_catalog_test audio_sequence_test
+		    audio_catalog_test audio_sequence_test dynamic_collision_test \
+		    scene_runtime_test scene_inventory_test
 
 # `all`/the repository's `make test` compile every test program. Use
 # `make check` to build and execute the complete ROM-free test suite.
@@ -24,9 +25,13 @@ all: $(ROM_FREE_TESTS) $(ROM_BACKED_TESTS)
 check: $(ROM_FREE_TESTS)
 	$(LIBRARY_PATH_ENV) ./engine_init_test
 	./rom_util_test
+	./scene_header_test
+	./scene_room_image_test
 	./audio_overflow_test
+	./audio_mixer_test
 	$(LIBRARY_PATH_ENV) ./enemy_bgm_test
 	$(LIBRARY_PATH_ENV) ./engine_limits_test
+	$(LIBRARY_PATH_ENV) ./host_actor_test
 	$(LIBRARY_PATH_ENV) ./fidelity_runner --self-test
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON3) rom_identity_test.py
 
@@ -44,7 +49,8 @@ asset_test: asset_test.c $(LIBOOT_LIBRARY)
 	cc -g -rdynamic -I../dist/include asset_test.c -o asset_test -L../dist -loot -lm $(RPATH_FLAG)
 
 engine_api_test: engine_api_test.c $(LIBOOT_LIBRARY)
-	cc -std=c11 -g -Wall -Wextra -Wpedantic -I../dist/include engine_api_test.c \
+	cc -std=c11 -g -Wall -Wextra -Wpedantic \
+		-DLIBOOT_EXPECT_MULTI_INSTANCE=1 -I../dist/include engine_api_test.c \
 		-o engine_api_test -L../dist -loot -lm $(RPATH_FLAG)
 
 engine_init_test: engine_init_test.c $(LIBOOT_LIBRARY)
@@ -61,9 +67,21 @@ rom_util_test: rom_util_test.c ../src/rom_util.c ../src/rom_util.h
 	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../src \
 		rom_util_test.c ../src/rom_util.c -o rom_util_test
 
+scene_header_test: scene_header_test.c ../src/scene_header.c ../src/scene_header.h
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../src \
+		scene_header_test.c ../src/scene_header.c -o scene_header_test
+
+scene_room_image_test: scene_room_image_test.c ../src/scene_room_image.c ../src/scene_room_image.h
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../src \
+		scene_room_image_test.c ../src/scene_room_image.c -o scene_room_image_test
+
 audio_overflow_test: audio_overflow_test.c ../src/audio_math.h
 	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror \
 		audio_overflow_test.c -o audio_overflow_test
+
+audio_mixer_test: audio_mixer_test.c ../src/audio_mixer.c ../src/audio_mixer.h
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../src \
+		audio_mixer_test.c ../src/audio_mixer.c -o audio_mixer_test
 
 enemy_bgm_test: enemy_bgm_test.c $(LIBOOT_LIBRARY)
 	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
@@ -71,8 +89,14 @@ enemy_bgm_test: enemy_bgm_test.c $(LIBOOT_LIBRARY)
 		$(RPATH_FLAG)
 
 engine_limits_test: engine_limits_test.c $(LIBOOT_LIBRARY)
-	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror \
+		-DLIBOOT_EXPECT_MULTI_INSTANCE=1 -I../dist/include \
 		engine_limits_test.c -o engine_limits_test -L../dist -loot \
+		$(RPATH_FLAG)
+
+host_actor_test: host_actor_test.c $(LIBOOT_LIBRARY)
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+		host_actor_test.c -o host_actor_test -L../dist -loot \
 		$(RPATH_FLAG)
 
 # ROM-backed audio tests take a ROM path at runtime; no copyrighted data is
@@ -88,6 +112,21 @@ audio_sequence_test: audio_sequence_test.c $(LIBOOT_LIBRARY)
 		audio_sequence_test.c -o audio_sequence_test -L../dist -loot -lm \
 		$(RPATH_FLAG)
 
+dynamic_collision_test: dynamic_collision_test.c $(LIBOOT_LIBRARY)
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+		dynamic_collision_test.c -o dynamic_collision_test -L../dist -loot -lm \
+		$(RPATH_FLAG)
+
+scene_runtime_test: scene_runtime_test.c $(LIBOOT_LIBRARY)
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+		scene_runtime_test.c -o scene_runtime_test -L../dist -loot -lm \
+		$(RPATH_FLAG)
+
+scene_inventory_test: scene_inventory_test.c $(LIBOOT_LIBRARY)
+	cc -std=c11 -g -Wall -Wextra -Wpedantic -Werror -I../dist/include \
+		scene_inventory_test.c -o scene_inventory_test -L../dist -loot \
+		$(RPATH_FLAG)
+
 # Versioned numeric/hash trace recorder and comparator. Its self-test is
 # copyright-free; record/compare modes require a user-supplied ROM.
 fidelity_runner: fidelity_runner.c $(LIBOOT_LIBRARY)
@@ -95,7 +134,7 @@ fidelity_runner: fidelity_runner.c $(LIBOOT_LIBRARY)
 		fidelity_runner.c -o fidelity_runner -L../dist -loot -lm \
 		$(RPATH_FLAG)
 clean:
-	rm -f headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test audio_overflow_test enemy_bgm_test engine_limits_test fidelity_runner audio_catalog_test audio_sequence_test playground csharp_init_test.exe
+	rm -f headless equip_test voicetest asset_test engine_api_test engine_init_test rom_util_test scene_header_test scene_room_image_test audio_overflow_test audio_mixer_test enemy_bgm_test engine_limits_test host_actor_test fidelity_runner audio_catalog_test audio_sequence_test dynamic_collision_test scene_runtime_test scene_inventory_test playground csharp_init_test.exe
 	rm -rf playground.dSYM
 .PHONY: all check clean playground
 

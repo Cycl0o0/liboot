@@ -50,10 +50,11 @@
 #include "libu64/overlay.h"
 #include "quest_hint.h"
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
 /*
  * The decomp runtime calls glibc's three-argument __assert entry point.
- * Darwin exposes __assert_rtn instead, so provide the expected ABI locally.
+ * Darwin exposes __assert_rtn and UCRT has no matching public symbol, so
+ * provide the expected ABI locally on both hosts.
  */
 #ifdef __assert
 #undef __assert
@@ -469,15 +470,6 @@ s32 CollisionCheck_CylSideVsLineSeg(f32 radius, f32 height, f32 offset, Vec3f* a
     if (out2 != NULL) memset(out2, 0, sizeof(*out2));
     return false;
 }
-
-/* No dynamic collision actors exist in the imported static scene. */
-s32 DynaPolyActor_TransformCarriedActor(CollisionContext* colCtx, s32 bgId, Actor* carriedActor) {
-    (void)colCtx; (void)bgId; (void)carriedActor; return false;
-}
-void DynaPolyActor_UnsetAllInteractFlags(DynaPolyActor* dynaActor) { (void)dynaActor; }
-void DynaPoly_SetPlayerAbove(CollisionContext* colCtx, s32 floorBgId) { (void)colCtx; (void)floorBgId; }
-void DynaPoly_SetPlayerOnTop(CollisionContext* colCtx, s32 floorBgId) { (void)colCtx; (void)floorBgId; }
-void func_80043334(CollisionContext* colCtx, Actor* actor, s32 bgId) { (void)colCtx; (void)actor; (void)bgId; }
 
 /* Effects are deliberately absent. */
 void EffectBlure_AddVertex(EffectBlure* this, Vec3f* p1, Vec3f* p2) { (void)this; (void)p1; (void)p2; }

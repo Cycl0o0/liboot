@@ -58,6 +58,7 @@ required_files=(
   "$cmake_config"
   "$doc/LICENSE"
   "$doc/NOTICE.md"
+  "$doc/LICENSES/LibUltraShip-MIT.txt"
   "$doc/README.md"
   "$doc/CHANGELOG.md"
   "$doc/CONTRIBUTING.md"
@@ -124,6 +125,9 @@ import subprocess
 import sys
 
 source, output, libdir = sys.argv[1:4]
+is_windows = os.name == "nt" or os.environ.get("RUNNER_OS") == "Windows"
+if is_windows:
+    output += ".exe"
 compiler = shlex.split(os.environ.get("CC", "cc"))
 cflags_other = shlex.split(
     subprocess.check_output(
@@ -153,8 +157,9 @@ common = [
     source,
     "-L" + libdir,
     *link_flags,
-    "-Wl,-rpath," + libdir,
 ]
+if not is_windows:
+    common.append("-Wl,-rpath," + libdir)
 subprocess.check_call([*compiler, *common, "-o", output])
 subprocess.check_call([output])
 

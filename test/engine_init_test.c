@@ -68,7 +68,9 @@ int main(void)
                  config.apiVersion == OOT_ENGINE_API_VERSION &&
                  config.actorCapacity == OOT_ENGINE_DEFAULT_ACTOR_CAPACITY &&
                  config.maxSubsteps == OOT_ENGINE_DEFAULT_MAX_SUBSTEPS &&
-                 config.fixedStepSeconds == OOT_ENGINE_DEFAULT_FIXED_STEP);
+                 config.fixedStepSeconds == OOT_ENGINE_DEFAULT_FIXED_STEP &&
+                 config.linkTriangleCapacity == OOT_ENGINE_DEFAULT_LINK_TRIANGLE_CAPACITY &&
+                 config.sceneTriangleCapacity == OOT_ENGINE_DEFAULT_SCENE_TRIANGLE_CAPACITY);
 
     memset(&input, 0xA5, sizeof(input));
     ok &= expect("input mismatch result", oot_engine_input_init_sized(

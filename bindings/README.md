@@ -11,9 +11,10 @@ selection of the raw audio and ocarina helpers from `src/liboot.h`:
   declarations suitable for Unity or another .NET host. See the
   [C# binding guide](csharp/README.md) for a complete lifecycle example.
 
-They preserve the native ownership rules: one `OoTEngine` and one Link per
-process, serialized calls on one gameplay thread, borrowed frame pointers, and
-no callback re-entry.
+They preserve the native ownership rules: one Link per engine, serialized calls
+on one gameplay thread, borrowed frame pointers, and no callback re-entry.
+Shared libraries may advertise multi-instance support; static archives remain
+single-instance.
 
 ## C++
 
@@ -40,7 +41,7 @@ Frames and the pointers inside them are borrowed. Do not retain a reference
 after another mutating call. Call `engine.close()` when teardown errors must be
 reported or retried. Destruction must happen outside a liboot callback; the
 noexcept RAII destructor terminates if native teardown fails rather than
-silently abandoning the process-wide singleton.
+silently abandoning the live native owner.
 
 `scene_geometry()` returns engine-owned arrays that can change on a scene or
 room load. `voice_pcm()` and `ocarina_note_pcm()` return small value records
@@ -55,9 +56,9 @@ by fixed storage.
 
 ## C# and Unity
 
-Compile with unsafe code enabled and place `liboot.so` (Linux) or
-`liboot.dylib` (macOS) where the runtime can resolve `liboot`. Windows is not
-currently supported. Check every initializer result before using its structure:
+Compile with unsafe code enabled and place `liboot.so` (Linux),
+`liboot.dylib` (macOS), or `liboot.dll` (Windows UCRT64) where the runtime can
+resolve `liboot`. Check every initializer result before using its structure:
 
 ```csharp
 LibOot.EngineConfig config = default;

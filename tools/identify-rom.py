@@ -82,8 +82,11 @@ def _canonicalize(block: bytes, rom_format: str) -> bytes:
 
 def _hash_canonical(
     stream: BinaryIO, first: bytes, expected_size: int, rom_format: str, unit: int
-) -> tuple[str, bytes]:
-    digest = hashlib.sha256()
+) -> tuple[str, str, bytes]:
+    sha256_digest = hashlib.sha256()
+    # MD5 is retained only for matching the decompilation project's published
+    # ROM identities; SHA-256 remains the collision-resistant reported digest.
+    md5_digest = hashlib.md5()  # nosec B324
     header = bytearray()
     pending = b""
     total = 0
@@ -97,7 +100,8 @@ def _hash_canonical(
         usable = len(pending) - (len(pending) % unit)
         if usable:
             canonical = _canonicalize(pending[:usable], rom_format)
-            digest.update(canonical)
+            sha256_digest.update(canonical)
+            md5_digest.update(canonical)
             if len(header) < HEADER_SIZE:
                 header.extend(canonical[: HEADER_SIZE - len(header)])
             pending = pending[usable:]
@@ -111,7 +115,7 @@ def _hash_canonical(
         raise IdentifyError("ROM size changed while it was being read")
     if len(header) < HEADER_SIZE:
         raise IdentifyError("ROM header is incomplete")
-    return digest.hexdigest(), bytes(header)
+    return sha256_digest.hexdigest(), md5_digest.hexdigest(), bytes(header)
 
 
 def _safe_ascii(raw: bytes, trim_padding: bool = False) -> str:
@@ -148,7 +152,7 @@ def identify(path: Path) -> dict[str, object]:
             if order is None:
                 raise IdentifyError("unrecognized N64 byte-order magic")
             rom_format, byte_order, unit = order
-            canonical_sha256, header = _hash_canonical(
+            canonical_sha256, canonical_md5, header = _hash_canonical(
                 stream, first, size, rom_format, unit
             )
         except OSError as error:
@@ -169,6 +173,7 @@ def identify(path: Path) -> dict[str, object]:
         "format": rom_format,
         "byte_order": byte_order,
         "canonical_sha256": canonical_sha256,
+        "canonical_md5": canonical_md5,
         "title": _safe_ascii(header[0x20:0x34], trim_padding=True),
         "game_code": _safe_ascii(header[0x3B:0x3F]),
         "region_code": region_code,
@@ -264,14 +269,19 @@ def load_profiles(path: Path) -> list[dict[str, object]]:
 
     profiles: list[dict[str, object]] = []
     seen_ids: set[str] = set()
-    seen_digests: set[str] = set()
-    allowed = {"id", "label", "canonical_sha256", "size_bytes"}
+    seen_sha256: set[str] = set()
+    seen_md5: set[str] = set()
+    allowed = {"id", "label", "canonical_sha256", "canonical_md5", "size_bytes"}
     for index, raw_profile in enumerate(raw_profiles):
         location = f"profile {index}"
         if not isinstance(raw_profile, dict) or not set(raw_profile) <= allowed:
             raise IdentifyError(f"{location} is not a valid profile object")
-        if not {"id", "canonical_sha256"} <= set(raw_profile):
-            raise IdentifyError(f"{location} is missing id or canonical_sha256")
+        if "id" not in raw_profile or not (
+            "canonical_sha256" in raw_profile or "canonical_md5" in raw_profile
+        ):
+            raise IdentifyError(
+                f"{location} is missing id or a canonical digest"
+            )
 
         profile_id = raw_profile["id"]
         if not isinstance(profile_id, str) or re.fullmatch(
@@ -281,12 +291,21 @@ def load_profiles(path: Path) -> list[dict[str, object]]:
         label = raw_profile.get("label", profile_id)
         if not _is_display_string(label, 128):
             raise IdentifyError(f"{location} has an invalid label")
-        raw_digest = raw_profile["canonical_sha256"]
-        if not isinstance(raw_digest, str) or re.fullmatch(
-            r"[0-9A-Fa-f]{64}", raw_digest
-        ) is None:
+        raw_sha256 = raw_profile.get("canonical_sha256")
+        if raw_sha256 is not None and (
+            not isinstance(raw_sha256, str)
+            or re.fullmatch(r"[0-9A-Fa-f]{64}", raw_sha256) is None
+        ):
             raise IdentifyError(f"{location} has an invalid canonical_sha256")
-        canonical_digest = raw_digest.lower()
+        canonical_sha256 = raw_sha256.lower() if raw_sha256 is not None else None
+
+        raw_md5 = raw_profile.get("canonical_md5")
+        if raw_md5 is not None and (
+            not isinstance(raw_md5, str)
+            or re.fullmatch(r"[0-9A-Fa-f]{32}", raw_md5) is None
+        ):
+            raise IdentifyError(f"{location} has an invalid canonical_md5")
+        canonical_md5 = raw_md5.lower() if raw_md5 is not None else None
 
         profile_size_value = raw_profile.get("size_bytes")
         if profile_size_value is not None and (
@@ -296,15 +315,21 @@ def load_profiles(path: Path) -> list[dict[str, object]]:
             raise IdentifyError(f"{location} has an invalid size_bytes")
         if profile_id in seen_ids:
             raise IdentifyError(f"profile database has duplicate id {profile_id}")
-        if canonical_digest in seen_digests:
+        if canonical_sha256 is not None and canonical_sha256 in seen_sha256:
             raise IdentifyError("profile database has a duplicate canonical_sha256")
+        if canonical_md5 is not None and canonical_md5 in seen_md5:
+            raise IdentifyError("profile database has a duplicate canonical_md5")
         seen_ids.add(profile_id)
-        seen_digests.add(canonical_digest)
+        if canonical_sha256 is not None:
+            seen_sha256.add(canonical_sha256)
+        if canonical_md5 is not None:
+            seen_md5.add(canonical_md5)
         profiles.append(
             {
                 "id": profile_id,
                 "label": label,
-                "canonical_sha256": canonical_digest,
+                "canonical_sha256": canonical_sha256,
+                "canonical_md5": canonical_md5,
                 "size_bytes": profile_size_value,
             }
         )
@@ -314,9 +339,16 @@ def load_profiles(path: Path) -> list[dict[str, object]]:
 def match_profile(
     result: dict[str, object], profiles: list[dict[str, object]]
 ) -> Optional[dict[str, str]]:
-    digest = result["canonical_sha256"]
     for profile in profiles:
-        if profile["canonical_sha256"] != digest:
+        sha256_matches = (
+            profile["canonical_sha256"] is None
+            or profile["canonical_sha256"] == result["canonical_sha256"]
+        )
+        md5_matches = (
+            profile["canonical_md5"] is None
+            or profile["canonical_md5"] == result["canonical_md5"]
+        )
+        if not sha256_matches or not md5_matches:
             continue
         declared_size = profile["size_bytes"]
         if declared_size is not None and declared_size != result["size_bytes"]:
@@ -330,6 +362,7 @@ def print_human(result: dict[str, object]) -> None:
     print(f"Format: {result['format']}")
     print(f"Byte order: {result['byte_order']}")
     print(f"Canonical SHA-256: {result['canonical_sha256']}")
+    print(f"Canonical MD5: {result['canonical_md5']}")
     print(f"Title: {result['title']}")
     print(f"Game code: {result['game_code']}")
     print(f"Region: {result['region']} ({result['region_code']})")

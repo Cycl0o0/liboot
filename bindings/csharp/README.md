@@ -15,8 +15,8 @@ mcs -unsafe -warnaserror -target:library -out:LibOot.dll LibOot.cs
 
 Place the native library where the application loader can find it. On Linux
 this is normally `liboot.so` beside the executable or in a directory from the
-dynamic loader search path; macOS uses `liboot.dylib`. The project does not
-currently provide a supported Windows DLL.
+dynamic loader search path; macOS uses `liboot.dylib`, and Windows UCRT64 uses
+`liboot.dll`.
 
 ## Safe initialization
 
@@ -82,15 +82,14 @@ finally
 ## AudioSeq playback
 
 While an engine is alive, the native audio state is ready for ROM-backed
-music, nature ambience, and the complete SFX selector. Call
-`Native.AudioSequencePlay` or `Native.AudioNaturePlay` under the same lock as
-your audio callback (and lock state getters too), then fill a pinned
-interleaved stereo `float` buffer with
-`Native.AudioRenderF32`. `Native.AudioSfxCatalogGet` initializes and returns a
-fixed-size `SfxInfo` record for selector UIs. Stop rendering before destroying
-the engine because audio state is process-global. Before starting the device,
-call `Native.AudioSequencePrewarm` for the tracks it may play; this keeps ROM
-decode/allocation work out of first-play device locks.
+music, nature ambience, and the complete SFX selector. Use the handle-taking
+`Native.EngineAudioSequencePlay` or `Native.EngineAudioNaturePlay` under the
+same host lock as the audio callback, then fill pinned interleaved `short` or
+`float` storage with `Native.EngineAudioRenderS16` or
+`Native.EngineAudioRenderF32`. `Native.AudioSfxCatalogGet` is an immutable
+catalog query for selector UIs. Stop rendering before destroying the engine.
+Before starting the device, call `Native.EngineAudioSequencePrewarm` for every
+track it may play; this keeps ROM decode/allocation work out of the callback.
 
 Keep the ROM pinned until `EngineCreate` returns; liboot copies the bytes during
 creation. Keep managed callback delegates strongly referenced for as long as
@@ -152,7 +151,8 @@ Check(Native.EngineOcarinaNoteGet(engine, 0, ref note), "get ocarina PCM");
 
 Enable or disable proximity-driven battle music with
 `Native.EngineSetEnemyBgm(engine, true)` and serialize it against the audio
-render callback just like other AudioSeq control calls.
+render callback just like other AudioSeq control calls. Read the selected
+engine's state with `Native.EngineGetEnemyBgm`.
 
 ## Gameplay values and native views
 

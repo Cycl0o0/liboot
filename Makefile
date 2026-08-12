@@ -2,14 +2,14 @@ default: lib
 
 CC      := cc
 PYTHON3 ?= python3
-OOT_DEFINES := -D_LANGUAGE_C -DNON_MATCHING -DAVOID_UB -DDEBUG_FEATURES=0 \
-               -DOOT_VERSION=NTSC_1_2 -DOOT_REVISION=2 \
+OOT_DEFINES := -DLIBOOT_HOST_BUILD=1 -D_LANGUAGE_C -DNON_MATCHING -DAVOID_UB -DDEBUG_FEATURES=0 \
+               -DOOT_VERSION=PAL_1_1 -DOOT_REVISION=1 \
                -DPLATFORM_N64=1 -DPLATFORM_GC=0 -DPLATFORM_IQUE=0 \
                -DF3DEX_GBI_2
 CFLAGS  := -g -Wall -Wno-unused-function -Wno-unused-variable \
            -fno-strict-aliasing -funsigned-char -fPIC -fvisibility=hidden \
-           -DOOT_LIB_EXPORT $(OOT_DEFINES) \
-           -Isrc -Isrc/shim -Isrc/decomp/include
+           -DOOT_LIB_EXPORT -DLIBOOT_MULTI_INSTANCE=1 $(OOT_DEFINES) \
+           -Isrc -Isrc/shim -Isrc/decomp/include -Isrc/decomp/src
 
 HOST_OS := $(shell uname -s)
 ifeq ($(HOST_OS),Darwin)
@@ -18,7 +18,7 @@ SHARED_LINK_FLAGS := -dynamiclib -Wl,-install_name,@rpath/liboot.dylib
 ASAN_DEFAULT_OPTIONS := detect_leaks=0:halt_on_error=1
 else
 SHARED_LIB_EXT    := so
-SHARED_LINK_FLAGS := -shared
+SHARED_LINK_FLAGS := -shared -Wl,-z,now
 ASAN_DEFAULT_OPTIONS := detect_leaks=1:halt_on_error=1
 endif
 LDFLAGS := -lm $(SHARED_LINK_FLAGS)
@@ -39,6 +39,7 @@ LIB_H_FILE        := $(DIST_DIR)/include/liboot.h
 LIB_ENGINE_H_FILE := $(DIST_DIR)/include/liboot_engine.h
 LIB_CPP_H_FILE    := $(DIST_DIR)/include/liboot.hpp
 LIB_LICENSE_FILE  := $(DIST_DIR)/LICENSE
+LIB_MIXER_LICENSE_FILE := $(DIST_DIR)/LICENSES/LibUltraShip-MIT.txt
 LIB_NOTICE_FILE   := $(DIST_DIR)/NOTICE.md
 LIB_README_FILE   := $(DIST_DIR)/README.md
 LIB_CHANGELOG_FILE := $(DIST_DIR)/CHANGELOG.md
@@ -67,7 +68,7 @@ DEP_FILES := $(O_FILES:.o=.d)
 DUMMY := $(shell mkdir -p $(addprefix $(BUILD_DIR)/,$(SRC_DIRS)) $(DIST_DIR)/include)
 
 lib: $(LIB_FILE) $(LIB_H_FILE) $(LIB_ENGINE_H_FILE) $(LIB_CPP_H_FILE) \
-     $(LIB_LICENSE_FILE) $(LIB_NOTICE_FILE) $(LIB_README_FILE) \
+     $(LIB_LICENSE_FILE) $(LIB_MIXER_LICENSE_FILE) $(LIB_NOTICE_FILE) $(LIB_README_FILE) \
      $(LIB_CHANGELOG_FILE) $(LIB_CONTRIBUTING_FILE) $(LIB_CONTRIBUTORS_FILE) \
      $(LIB_SECURITY_FILE) \
      $(LIB_DOCS_STAMP)
@@ -89,6 +90,10 @@ $(LIB_CPP_H_FILE): bindings/cpp/liboot.hpp
 	cp $< $@
 
 $(LIB_LICENSE_FILE): LICENSE
+	cp $< $@
+
+$(LIB_MIXER_LICENSE_FILE): LICENSES/LibUltraShip-MIT.txt
+	@mkdir -p $(dir $@)
 	cp $< $@
 
 $(LIB_NOTICE_FILE): NOTICE.md

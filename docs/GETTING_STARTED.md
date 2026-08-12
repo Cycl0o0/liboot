@@ -11,8 +11,8 @@ Godot, Unreal, Rust, Python, and custom-engine patterns, continue with
 - A C11 compiler and GNU Make, or CMake 3.16 or newer.
 - Python 3.8 or newer for `make check` and CMake builds with testing enabled
   (the default). A library-only CMake build can use `-DBUILD_TESTING=OFF`.
-- Linux or macOS. CI builds shared and static libraries on Linux x86-64,
-  Linux ARM64, and macOS. Windows is not currently supported.
+- Linux, macOS, or Windows x86-64 under MSYS2 UCRT64/MinGW. CI builds shared
+  and static libraries on Linux x86-64, Linux ARM64, macOS, and Windows UCRT64.
 - A legally obtained, compatible Ocarina of Time ROM supplied at runtime.
   ROMs and extracted assets must not be committed to a project using liboot;
   the engine wrapper accepts buffers from `OOT_ENGINE_MIN_ROM_SIZE` (`0x1060`)
@@ -26,6 +26,11 @@ On Debian or Ubuntu, the full playground toolchain is:
 ```sh
 sudo apt install build-essential pkg-config libsdl2-dev libgl-dev
 ```
+
+On Windows, open an MSYS2 UCRT64 shell and install
+`mingw-w64-ucrt-x86_64-gcc`, `mingw-w64-ucrt-x86_64-cmake`,
+`mingw-w64-ucrt-x86_64-ninja`, `make`, and `python`. Release DLLs use the same
+UCRT64 ABI.
 
 ## Build
 
@@ -83,8 +88,8 @@ API. The engine-neutral lifecycle is:
    returns.
 4. Load host collision with `oot_engine_static_world_load` or a ROM scene with
    `oot_engine_scene_load`.
-5. Create the single Link instance with `oot_engine_link_create`.
-6. Call `oot_engine_step` at exactly 20 Hz, or use `oot_engine_advance`.
+5. Create the engine's Link instance with `oot_engine_link_create`.
+6. Call `oot_engine_step` once every 60 ms, or use `oot_engine_advance`.
 7. Render or inspect the borrowed `OoTEngineFrame`.
 8. Call `oot_engine_destroy`; it also deletes an active Link.
 
@@ -93,9 +98,9 @@ the real collision engine, so the wrapper rejects an unsafe ordering.
 
 ## Fixed simulation step
 
-The gameplay core updates at 20 Hz: one simulation tick every 50 ms. Render
-at any rate. The wrapper includes a capped accumulator and latches a button
-tap received during a render frame that does not produce a simulation tick.
+PAL gameplay advances one tick every 60 ms (`3/50` seconds, or 16⅔ Hz). Render
+at any rate. The wrapper includes a capped accumulator and latches a button tap
+received during a render frame that does not produce a simulation tick.
 
 ```c
 void host_frame(float elapsed_seconds) {
@@ -128,10 +133,10 @@ library rather than once per render frame. The C initializer name above is an
 ergonomic macro over `oot_engine_input_init_sized`; it supplies `sizeof(input)`
 and `OOT_ENGINE_API_VERSION`, and its `OoTResult` must still be checked.
 
-Call `oot_engine_step` instead if the host already owns a fixed 20 Hz loop.
+Call `oot_engine_step` instead if the host already owns a fixed 60 ms loop.
 Raw `oot_link_tick` also advances exactly one tick and never accepts delta
 time. `fixedStepSeconds` is a scheduling interval and accepts values from
-`0.001` through `1.0` seconds; values other than the authentic `0.05` change
+`0.001` through `1.0` seconds; values other than the authentic `3/50` change
 gameplay speed. `maxSubsteps` accepts 1 through 1000 (default 4). For either
 field, zero selects the initialized default.
 
@@ -150,8 +155,12 @@ renderer-neutral:
 - colors contain RGB floats per vertex;
 - UVs contain two floats per vertex;
 - `triTexture[t]` selects a texture for triangle `t`, or `0xFFFF` for none;
-- the engine wrapper reports `numTriangles` and `triangleCapacity`; the raw
-  buffer reports `numTrianglesUsed`, bounded by `OOT_GEO_MAX_TRIANGLES`.
+- the engine wrapper reports `numTriangles` and its configured
+  `triangleCapacity`; raw callers use `oot_link_tick_sized` with the appended
+  `triangleCapacity`/`numTrianglesUsed32` fields. The legacy `oot_link_tick`
+  remains bounded by `OOT_GEO_MAX_TRIANGLES` for binary compatibility.
+- frame and scene batch arrays identify contiguous source-entity and material
+  ranges, including texture, pass, blend, depth, culling, and RDP mode data.
 - `frame->linkGeometryTruncated` reports whether the combined Link/Navi/actor
   stream omitted valid triangles at that cap.
 
@@ -160,18 +169,18 @@ raw equivalents). Cache textures by index and upload again only when the
 reported revision changes. Pixels are RGBA8. Honor `wrapS` and `wrapT`: `0`
 repeat, `1` mirror, `2` clamp.
 
-Navi wings and projectile geometry are opt-in and append to the same fixed
-triangle buffer:
+Navi wings and projectile geometry are opt-in and append to the configured
+frame triangle buffer:
 
 ```c
 oot_engine_set_render_flags(
     engine, OOT_ENGINE_RENDER_NAVI | OOT_ENGINE_RENDER_ACTORS);
 ```
 
-The buffer does not currently identify which entity produced each triangle.
-The wrapper includes projectile transforms in `OoTEngineFrame.actors`. Raw API
-hosts use `oot_navi_set_render`, `oot_actor_set_render`, and `oot_actor_query`
-directly.
+The batch array identifies the source kind and instance, source actor or room,
+triangle range, texture, and material state. The wrapper also includes
+projectile transforms in `OoTEngineFrame.actors`. Raw API hosts use
+`oot_navi_set_render`, `oot_actor_set_render`, and `oot_actor_query` directly.
 
 ## Collision and scenes
 
@@ -183,6 +192,12 @@ most `OOT_ENGINE_MAX_STATIC_SURFACES` (2730) triangles and
 `OOT_ENGINE_MAX_WATER_BOXES` (65,535) water boxes; water dimensions must be
 positive.
 
+Create moving floors, doors, or platforms with
+`oot_engine_dynamic_collision_create`, update their transforms before a step,
+and delete their generation-checked handles when done. Live objects are rebound
+after a static-world or scene replacement. The shared native budget is 50
+objects, 512 triangles, and 512 unique local vertices.
+
 For supported ROM scenes, call `oot_engine_scene_load(engine, scene, room,
 &nativeResult)`. Scene loading replaces the current static world. Query
 opaque and translucent room geometry with `oot_engine_scene_get_geometry`,
@@ -191,6 +206,12 @@ behavior with `oot_engine_scene_get_runtime`. The latter reports the real room
 type/environment, echo, Lens behavior, warp restriction and camera type that
 the vendored Player code is currently using. A custom-world load makes this
 query return `OOT_ENGINE_RESULT_NOT_AVAILABLE`.
+
+Use `oot_engine_scene_load_ex` when an explicit child/adult and day/night layer
+is required. Exit and void-out contacts are queued as
+`OoTWorldEvent` records; the host chooses and loads the destination. Scene actor
+entries, room-image sources, and animated-material references can be queried
+without executing arbitrary actor overlays or submitting graphics commands.
 
 ## Audio
 
@@ -202,26 +223,31 @@ Despite its compatibility name, `oot_engine_voice_get` (and the raw
 Link/Navi voice clips. `oot_engine_ocarina_note_get` supplies sample rates and
 loop points for all five Ocarina notes.
 
-For music and the full sound selector, use the process-global raw audio API
-while the engine is alive. `oot_audio_sequence_play` addresses all 110 ROM
+For music and the full sound selector, use the handle-taking
+`oot_engine_audio_*` functions. They select the engine's own AudioSeq state in
+shared-library builds. `oot_engine_audio_sequence_play` addresses all 110 ROM
 sequences on the main, fanfare, SFX, or sub player;
-`oot_audio_nature_play` applies one of the 19 complete ambience IO presets;
-`oot_audio_sfx_catalog_get` enumerates the seven named banks. Feed your audio
-device by pulling interleaved stereo F32 with `oot_audio_render_f32`. The pull
-function accepts host rates from 8 to 192 kHz and allocates no memory.
-Call `oot_audio_sequence_prewarm` for every track your application may start
-before opening the device (the playground prewarms all 110), so first-use
-VADPCM decoding cannot block several callback buffers under the device lock.
+`oot_engine_audio_nature_play` applies one of the 19 ambience IO presets. The
+immutable raw `oot_audio_sfx_catalog_get` query enumerates the seven named
+banks. Pull canonical interleaved S16 with `oot_engine_audio_render_s16`, or
+F32 converted from that stream with `oot_engine_audio_render_f32`. Both accept
+host rates from 8 to 192 kHz and allocate no memory while rendering.
+Call `oot_engine_audio_sequence_prewarm` for every track the application may
+start before opening the device (the playground prewarms all 110), so first-use
+VADPCM decoding stays out of the real-time callback.
 
-Callbacks run synchronously inside `oot_link_tick`. Queue events for the
-engine audio thread instead of calling the gameplay API recursively.
-Likewise, serialize every mutable AudioSeq access, including state getters,
-against the render callback.
+Callbacks run synchronously inside the tick. Queue events for the engine audio
+thread instead of calling the API recursively. Serialize engine audio control,
+state, rendering, and gameplay calls; contention returns
+`OOT_ENGINE_RESULT_BUSY` rather than waiting inside the library.
 
-## Current lifecycle and threading limits
+## Lifecycle and threading
 
-- The implementation is process-global and supports one engine and one Link.
-- A second `oot_engine_create` returns `OOT_ENGINE_RESULT_SINGLETON_IN_USE`.
+- Shared-library builds advertise `OOT_ENGINE_CAPABILITY_MULTI_INSTANCE` and
+  isolate writable native state per engine. Each engine owns one Link.
+- Static archives advertise `OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON`; a
+  second engine returns `OOT_ENGINE_RESULT_SINGLETON_IN_USE`.
+- The raw lifecycle API is process-global. Do not mix it with active engines.
 - Calls must be serialized on one gameplay thread.
 - Concurrent or callback-reentrant wrapper calls return
   `OOT_ENGINE_RESULT_BUSY`.

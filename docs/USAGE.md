@@ -67,23 +67,24 @@ free(romBytes);   /* the ROM was copied synchronously */
 require_ok(oot_engine_destroy(engine));   /* also deletes an active Link */
 ```
 
-`oot_engine_create` returns `OOT_ENGINE_RESULT_SINGLETON_IN_USE` if an engine
-already exists in the process, and `OOT_ENGINE_RESULT_ROM_UNSUPPORTED` if the
-ROM cannot be parsed. Configuration knobs on `OoTEngineConfig`:
+`oot_engine_create` returns `OOT_ENGINE_RESULT_SINGLETON_IN_USE` for a second
+engine when the loaded library advertises `PROCESS_SINGLETON`, and
+`OOT_ENGINE_RESULT_ROM_UNSUPPORTED` if the ROM cannot be parsed. Shared-library
+builds advertise `MULTI_INSTANCE`. Configuration knobs on `OoTEngineConfig`:
 
 | Field | Default | Range |
 | --- | --- | --- |
 | `actorCapacity` | 64 | 1..4096 |
 | `maxSubsteps` | 4 | 1..1000 |
-| `fixedStepSeconds` | 1/20 | 0.001..1.0 |
+| `fixedStepSeconds` | 3/50 | 0.001..1.0 |
 
 Setting any of the three to `0` selects its default. A value of
-`fixedStepSeconds` other than `0.05` changes gameplay speed.
+`fixedStepSeconds` other than `3.0f / 50.0f` changes gameplay speed.
 
 ## Step the simulation
 
-The gameplay core runs at a fixed 20 Hz — one tick every 50 ms. Render at any
-rate. Use `oot_engine_step` if your host already owns a 20 Hz loop:
+PAL gameplay advances one tick every 60 ms (16⅔ Hz). Render at any rate. Use
+`oot_engine_step` if your host already owns a 60 ms loop:
 
 ```c
 OoTEngineInput input;
@@ -358,24 +359,28 @@ if (oot_engine_voice_get(engine, sfxId, &pcm) == OOT_ENGINE_RESULT_OK) {
 
 ## Music and ambience
 
-Full-song playback and the native mixer are on the process-global raw audio API
-in [`liboot.h`](../src/liboot.h). They are safe to call while an engine is
-alive; serialize every mutable AudioSeq call against your render callback.
+Full-song playback and the native mixer have handle-taking engine functions.
+Use them whenever an `OoTEngine` owns the lifecycle, and serialize every engine
+call against the render callback.
 
 ```c
-#include "liboot.h"
+#include "liboot_engine.h"
 
 /* Decode every sample a track uses before opening the audio device, so
    first-use VADPCM decoding cannot stall an audio callback under the lock. */
-oot_audio_sequence_prewarm(seqId);
+check(oot_engine_audio_sequence_prewarm(engine, seqId));
 
 /* enum OoTAudioPlayer: MAIN=0, FANFARE=1, SFX=2, SUB=3. */
-oot_audio_sequence_play(OOT_AUDIO_PLAYER_MAIN, seqId, /*fadeInMs=*/ 500);
-oot_audio_nature_play(OOT_AUDIO_PLAYER_MAIN, ambienceId, /*fadeInMs=*/ 500);  /* one of 19 presets */
+check(oot_engine_audio_sequence_play(
+    engine, OOT_AUDIO_PLAYER_MAIN, seqId, /*fadeInMs=*/ 500));
+check(oot_engine_audio_nature_play(
+    engine, OOT_AUDIO_PLAYER_MAIN, ambienceId, /*fadeInMs=*/ 500));
 
-/* Pull interleaved stereo F32 from your device callback. Allocation-free;
-   host rates 8..192 kHz. Returns the number of frames written. */
-uint32_t got = oot_audio_render_f32(outStereo, requestedFrames, deviceSampleRate);
+/* Pull interleaved stereo S16 from the device callback. Allocation-free;
+   host rates 8..192 kHz. F32 rendering is also available. */
+uint32_t got = 0;
+check(oot_engine_audio_render_s16(
+    engine, outStereo, requestedFrames, deviceSampleRate, &got));
 ```
 
 A scene reports the music and ambience it wants; feed those ids straight in:
@@ -384,8 +389,12 @@ A scene reports the music and ambience it wants; feed those ids straight in:
 int32_t seqId = -1, ambienceId = -1;
 oot_engine_scene_get_sequence_id(engine, &seqId);
 oot_engine_scene_get_ambience_id(engine, &ambienceId);
-if (seqId >= 0)      oot_audio_sequence_play(OOT_AUDIO_PLAYER_MAIN, (uint16_t)seqId, 1000);
-if (ambienceId >= 0) oot_audio_nature_play(OOT_AUDIO_PLAYER_MAIN, (uint8_t)ambienceId, 1000);
+if (seqId >= 0)
+    check(oot_engine_audio_sequence_play(
+        engine, OOT_AUDIO_PLAYER_MAIN, (uint16_t)seqId, 1000));
+if (ambienceId >= 0)
+    check(oot_engine_audio_nature_play(
+        engine, OOT_AUDIO_PLAYER_MAIN, (uint8_t)ambienceId, 1000));
 ```
 
 `oot_audio_sfx_catalog_get` enumerates the seven named banks with their
@@ -402,30 +411,28 @@ remains. It is disabled by default and layers over any scene BGM you drive on
 another player.
 
 ```c
-#include "liboot.h"
-
-/* Enable with defaults: OOT_AUDIO_PLAYER_SUB, NA_BGM_ENEMY (0x1A), 400 ms fade.
-   0xFF keeps the default player; 0 keeps the default sequence. */
-oot_audio_set_enemy_bgm(true, 0xFF, 0, 400);
+/* Engine defaults: OOT_AUDIO_PLAYER_SUB, NA_BGM_ENEMY, 400 ms fade. */
+check(oot_engine_set_enemy_bgm(engine, 1));
 
 /* ... run oot_link_tick / oot_engine_step as usual; the driver runs per tick.
    The Attention system sees hostile actors, including host Z-targets. */
 
 /* Optional: read the live state to duck your own scene BGM, draw a UI, etc. */
-bool active = false;
+uint8_t enabled = 0;
+uint8_t active = 0;
 float distance = 0.0f;
-bool enabled = oot_audio_get_enemy_bgm(&active, &distance);
+check(oot_engine_get_enemy_bgm(engine, &enabled, &active, &distance));
 /* active = battle theme playing; distance = units to the nearest in-range
    enemy this tick (or 500 when none). */
 
-oot_audio_set_enemy_bgm(false, 0xFF, 0, 400);   /* fades out any active theme */
+check(oot_engine_set_enemy_bgm(engine, 0));
 ```
 
 From the engine API, `oot_engine_set_enemy_bgm(engine, 1)` enables it with those
-defaults; use the raw calls above for the player/sequence/fade overrides and the
-live state. Because the driver runs inside the tick and touches the sequence
-player, keep your usual AudioSeq serialization (tick vs `oot_audio_render_f32`)
-in place.
+defaults and `oot_engine_get_enemy_bgm` reads its live state. The corresponding
+raw calls remain available to raw-lifecycle hosts that need player/sequence/fade
+overrides. Because the driver runs inside the tick and touches the sequence
+player, serialize stepping against `oot_engine_audio_render_s16` or F32 output.
 
 ## The Ocarina
 
@@ -476,7 +483,7 @@ Codes you will actually branch on:
 
 | Result | Meaning |
 | --- | --- |
-| `OOT_ENGINE_RESULT_SINGLETON_IN_USE` | An engine already exists in this process. |
+| `OOT_ENGINE_RESULT_SINGLETON_IN_USE` | A second engine was requested from a `PROCESS_SINGLETON` build. |
 | `OOT_ENGINE_RESULT_ROM_UNSUPPORTED` | The ROM could not be parsed. |
 | `OOT_ENGINE_RESULT_NOT_AVAILABLE` | Wrong ordering, or a scene-only query with no scene loaded. |
 | `OOT_ENGINE_RESULT_AGE_RESTRICTED` | Item or action not allowed for the current age. |
@@ -512,9 +519,9 @@ be reported rather than terminating.
 ## C# and Unity binding
 
 Blittable layouts and P/Invoke declarations for a .NET or Unity host. Compile
-with unsafe code enabled and place `liboot.so` (Linux) or `liboot.dylib` (macOS)
-where the runtime can resolve `liboot`. Windows is not currently supported.
-Check every initializer:
+with unsafe code enabled and place `liboot.so` (Linux), `liboot.dylib` (macOS),
+or `liboot.dll` (Windows UCRT64) where the runtime can resolve `liboot`. Check
+every initializer:
 
 ```csharp
 LibOot.EngineConfig config = default;
@@ -536,13 +543,14 @@ before handing data to another thread. See
 
 ## Threading rules
 
-- One `OoTEngine` and one Link per process. A second `oot_engine_create`
-  returns `OOT_ENGINE_RESULT_SINGLETON_IN_USE`.
+- Shared libraries isolate multiple `OoTEngine` owners; each owns one Link.
+  Static archives advertise `OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON` and
+  reject a second engine.
 - Serialize all gameplay calls on one thread. Concurrent or callback-reentrant
   calls return `OOT_ENGINE_RESULT_BUSY`.
 - SFX and debug callbacks run inside the tick. Copy the payload and return; do
   not call liboot from a callback.
-- The audio mixer (`oot_audio_render_f32`) runs on the device thread. Serialize
-  every mutable AudioSeq call, including state getters, against it.
+- The handle-taking audio mixer runs on the device thread. Serialize every
+  engine call, including AudioSeq state getters, against it.
 - Frame, texture, and PCM pointers are borrowed and short-lived. Treat them as
   read-only and copy anything you keep.

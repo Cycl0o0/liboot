@@ -3,6 +3,14 @@
 
 #include "message.h"
 
+/* liboot: MinGW exposes errno as a function-like object macro.  Keep the N64
+ * field name for upstream builds while avoiding macro expansion on hosts. */
+#if defined(LIBOOT_HOST_BUILD)
+#define LIBOOT_CONTROLLER_ERROR_FIELD error
+#else
+#define LIBOOT_CONTROLLER_ERROR_FIELD errno
+#endif
+
 #define CHNL_ERR(readFormat) (((readFormat).rxsize & CHNL_ERR_MASK) >> 4)
 
 #define BLOCKSIZE 32
@@ -121,14 +129,14 @@ typedef union OSPifRam {
 typedef struct OSContStatus {
     /* 0x00 */ u16 type;
     /* 0x02 */ u8 status;
-    /* 0x03 */ u8 errno;
+    /* 0x03 */ u8 LIBOOT_CONTROLLER_ERROR_FIELD;
 } OSContStatus; // size = 0x04
 
 typedef struct OSContPad {
     /* 0x00 */ u16 button;
     /* 0x02 */ s8 stick_x;
     /* 0x03 */ s8 stick_y;
-    /* 0x04 */ u8 errno;
+    /* 0x04 */ u8 LIBOOT_CONTROLLER_ERROR_FIELD;
 } OSContPad; // size = 0x06
 
 typedef struct OSContRamIo {
@@ -136,8 +144,10 @@ typedef struct OSContRamIo {
     /* 0x04 */ u8 databuffer[32];
     /* 0x24 */ u8 addressCrc;
     /* 0x25 */ u8 dataCrc;
-    /* 0x26 */ u8 errno;
+    /* 0x26 */ u8 LIBOOT_CONTROLLER_ERROR_FIELD;
 } OSContRamIo; // size = 0x28
+
+#undef LIBOOT_CONTROLLER_ERROR_FIELD
 
 typedef struct __OSContRequesFormat {
     /* 0x00 */ u8 align;

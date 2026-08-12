@@ -12,6 +12,8 @@
  */
 #include "liboot.h"
 #include "rom_util.h"
+#include "scene_header.h"
+#include "scene_room_image.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -21,6 +23,7 @@
 #include "ultra64.h"
 #include "bgcheck.h"
 #include "play_state.h"
+#include "player.h"
 #include "regs.h"
 #include "save.h"
 #include "scene.h"
@@ -35,11 +38,19 @@ extern const uint8_t *liboot_rom( size_t *outSize );
 /* gfx_adapter scene entry points */
 extern void liboot_scene_dl_begin( struct OoTLinkGeometryBuffers *out, int maxTris );
 extern void liboot_scene_dl_run( uint32_t dlAddr );
+extern void liboot_scene_dl_set_source( int roomIdx, int pass );
 extern void liboot_gfx_evict_scene( void );
 extern void liboot_gfx_set_room( int roomIdx );   /* per-room texture-cache key */
 extern void liboot_gfx_set_lights( const float ambient[3], const float dir0[3],
                                    const float col0[3], const float dir1[3],
                                    const float col1[3], int count );
+extern uint32_t liboot_scene_material_reference_count( void );
+extern bool liboot_scene_material_reference_get(
+    uint32_t index, struct OoTSceneMaterialReference *outReference );
+extern uint16_t liboot_scene_material_segment_mask( void );
+extern bool liboot_scene_material_references_truncated( void );
+extern void liboot_dynamic_collision_rebind_all( void );
+extern void liboot_host_actor_sync_room( void );
 
 /* Internal z_bgcheck helpers used to perform the same subdivision walk as
    BgCheck_Allocate without allocating or mutating the live CollisionContext. */
@@ -84,6 +95,9 @@ static struct {
     u8 *sceneBlob; size_t sceneSize;
     u8 *roomBlob;  size_t roomSize;
     int32_t curScene, curRoom;
+    uint8_t layer;
+    bool layerFallback;
+    uint8_t drawConfigId;
     /* scene header facts */
     u32 playerEntryOff, spawnListOff;   /* 0 = absent */
     int numRooms;
@@ -92,10 +106,18 @@ static struct {
     int seqId, ambienceId;              /* liboot vNEXT: bgm + ambience ids, -1 = absent */
     bool roomMetadataValid;             /* active header carried cmds 0x08 + 0x16 */
     struct OoTSceneEnvironment env;     /* liboot vNEXT: active light/fog settings */
+    struct OoTSceneActorEntry *actors;  /* effective scene + loaded-room cmd 0x01 */
+    uint32_t numActors;
+    struct OoTSceneBackground *backgrounds;
+    uint32_t numBackgrounds;
     /* relocated native collision */
     Vec3s *colVtx;
     CollisionPoly *colPoly;
     SurfaceType *colSurf;
+    SurfaceType *colRawSurf;
+    uint32_t numColSurf;
+    int16_t *exits;
+    uint8_t numExits;
     WaterBox *colWb;
     CollisionHeader colHeader;
     /* lib-owned interpreted room geometry (opa first, then xlu) */
@@ -103,8 +125,76 @@ static struct {
     uint16_t *triTex;
     float *alpha;   /* liboot vNEXT: per-vertex shade alpha, parallel to col */
     uint8_t *triFlags;  /* liboot vNEXT: per-triangle render flags (OoTTriangleFlags) */
+    struct OoTGeometryBatch *batches;
     uint32_t numTris, xluStart;
+    uint32_t numBatches;
+    uint32_t allocatedGeometryCapacity;
 } s_scene;
+
+#define BACKGROUND_CATALOG_MAX_BYTES ( 256u * 1024u * 1024u )
+
+typedef struct BackgroundCatalog
+{
+    struct OoTSceneBackground *entries;
+    uint32_t count;
+    uint32_t capacity;
+    size_t ownedBytes;
+} BackgroundCatalog;
+
+/* Kept outside s_scene so replacing a ROM scene with a custom static world
+   does not silently discard the engine's configured capacity. */
+static uint32_t sSceneGeometryCapacity = OOT_SCENE_MAX_TRIANGLES;
+
+#define WORLD_EVENT_QUEUE_CAPACITY 8u
+static struct {
+    struct OoTWorldEvent queue[WORLD_EVENT_QUEUE_CAPACITY];
+    uint64_t nextSequence;
+    uint32_t head;
+    uint32_t count;
+    uint32_t contactKind;
+    int16_t contactExitIndex;
+    uint8_t contactFloorProperty;
+} s_worldEvents;
+
+static void world_events_clear( void )
+{
+    s_worldEvents.head = 0u;
+    s_worldEvents.count = 0u;
+    s_worldEvents.contactKind = 0u;
+    s_worldEvents.contactExitIndex = 0;
+    s_worldEvents.contactFloorProperty = 0u;
+}
+
+static bool world_event_push( uint32_t kind, int16_t exitIndex,
+                              int16_t entranceIndex, uint8_t floorProperty,
+                              const PlayState *play, const Player *player )
+{
+    struct OoTWorldEvent *event;
+    uint32_t tail;
+    if( s_worldEvents.count >= WORLD_EVENT_QUEUE_CAPACITY ||
+        play == NULL || player == NULL )
+        return false;
+    tail = ( s_worldEvents.head + s_worldEvents.count ) % WORLD_EVENT_QUEUE_CAPACITY;
+    event = &s_worldEvents.queue[tail];
+    memset( event, 0, sizeof( *event ));
+    event->structSize = sizeof( *event );
+    event->version = OOT_WORLD_EVENT_VERSION;
+    if( ++s_worldEvents.nextSequence == 0u )
+        s_worldEvents.nextSequence = 1u;
+    event->sequence = s_worldEvents.nextSequence;
+    event->kind = kind;
+    event->sceneIndex = s_scene.sceneBlob ? s_scene.curScene : -1;
+    event->roomIndex = s_scene.sceneBlob ? play->roomCtx.curRoom.num : -1;
+    event->exitIndex = exitIndex;
+    event->entranceIndex = entranceIndex;
+    event->floorProperty = floorProperty;
+    event->layer = s_scene.sceneBlob ? s_scene.layer : OOT_SCENE_LAYER_CHILD_DAY;
+    event->position[0] = player->actor.world.pos.x;
+    event->position[1] = player->actor.world.pos.y;
+    event->position[2] = player->actor.world.pos.z;
+    s_worldEvents.count++;
+    return true;
+}
 
 /* ------------------------------------------------------------------ */
 static int pair_cmp( const void *a, const void *b )
@@ -246,55 +336,7 @@ static u8 *extract_vrom_file( u32 vromStart, u32 vromEnd, size_t *outSize )
 }
 
 /* ---- header walks ------------------------------------------------- */
-typedef struct {
-    u32 colOff;             /* seg2 offset, UINT32_MAX = absent */
-    int numRooms;
-    u32 roomListOff;
-    u32 playerEntryOff;
-    u32 spawnListOff;
-    int numDoors;           /* liboot vNEXT: transition actors (doors) */
-    u32 doorListOff;        /* seg2 offset of the TransitionActorEntry[] */
-    int seqId;              /* liboot vNEXT: bgm sequence id, -1 = absent */
-    int ambienceId;         /* nature ambience id, -1 = absent */
-    int numLights;          /* liboot vNEXT: EnvLightSettings count (cmd 0x0F) */
-    u32 lightListOff;       /* seg2 offset of the EnvLightSettings[] */
-    u8 sceneCamType;        /* misc settings cmd 0x19 data1 */
-    s16 worldMapArea;       /* misc settings cmd 0x19 data2 */
-} SceneHeader;
-
-/* 8-byte commands {u8 cmd, u8 data1, u16 pad, u32 data2} until 0x14.
-   Seg-2 pointers must carry top byte 2. Alt headers (0x18) are skipped:
-   v1 always uses the main header. */
-static bool walk_scene_header( const u8 *s, size_t size, SceneHeader *out )
-{
-    memset( out, 0, sizeof( *out ));
-    out->colOff = UINT32_MAX;
-    out->seqId = -1;
-    out->ambienceId = -1;
-    for( size_t off = 0; off + 8 <= size && off < 64 * 8; off += 8 ) {
-        u8 cmd = s[off], d1 = s[off + 1];
-        u32 d2 = be32( s + off + 4 );
-        switch( cmd ) {
-        case 0x14: /* END */
-            return out->colOff != UINT32_MAX && out->numRooms > 0;
-        case 0x00: if(( d2 >> 24 ) == 2 ) out->playerEntryOff = d2 & 0xFFFFFF; break;
-        case 0x03: if(( d2 >> 24 ) == 2 ) out->colOff = d2 & 0xFFFFFF; break;
-        case 0x04: if(( d2 >> 24 ) == 2 ) { out->numRooms = d1; out->roomListOff = d2 & 0xFFFFFF; } break;
-        case 0x06: if(( d2 >> 24 ) == 2 ) out->spawnListOff = d2 & 0xFFFFFF; break;
-        /* liboot vNEXT: transition actor (door) list — cmd 0x0E {count, seg2ptr}. */
-        case 0x0E: if(( d2 >> 24 ) == 2 ) { out->numDoors = d1; out->doorListOff = d2 & 0xFFFFFF; } break;
-        /* liboot vNEXT: sound settings — cmd 0x15, data2 = BBBB(0,0,ambience,seqId). */
-        case 0x15: out->seqId = (int)( d2 & 0xFF ); out->ambienceId = (int)(( d2 >> 8 ) & 0xFF ); break;
-        /* liboot vNEXT: light settings list — cmd 0x0F {count, seg2ptr to EnvLightSettings[]}. */
-        case 0x0F: if(( d2 >> 24 ) == 2 ) { out->numLights = d1; out->lightListOff = d2 & 0xFFFFFF; } break;
-        /* Retail Scene_CommandMiscSettings: the camera type affects Player and
-           BgCheck branches; worldMapArea is retained by SaveContext. */
-        case 0x19: out->sceneCamType = d1; out->worldMapArea = (s16)d2; break;
-        default: break;
-        }
-    }
-    return false;
-}
+typedef LibootSceneHeader SceneHeader;
 
 /* liboot vNEXT: read the scene's active EnvLightSettings (index 0 — the default
    entry; alternate-header / time-of-day selection is a later stage) into the
@@ -332,50 +374,18 @@ static void apply_scene_environment( const u8 *blob, size_t blobSize, const Scen
         liboot_gfx_set_lights( NULL, NULL, NULL, NULL, NULL, 0 );
 }
 
-typedef struct {
-    u32 shapeOff;             /* seg3 offset, UINT32_MAX = absent */
-    u8 type;
-    u8 environmentType;
-    u8 lensMode;
-    u8 disableWarpSongs;
-    s8 echo;
-    bool hasBehavior;
-    bool hasEcho;
-} RoomHeader;
+typedef LibootRoomHeader RoomHeader;
 
-/* Parse the main room header completely. The original game applies cmd 0x08
-   to Room/MessageContext and cmd 0x16 to Room.echo; returning on the first
-   mesh command used to discard both whenever they followed it. */
-static bool walk_room_header( const u8 *r, size_t size, RoomHeader *out )
+static bool walk_scene_header( const u8 *s, size_t size, uint8_t layer,
+                               SceneHeader *out, bool *outFallback )
 {
-    memset( out, 0, sizeof( *out ));
-    out->shapeOff = UINT32_MAX;
-    for( size_t off = 0; off + 8 <= size && off < 64 * 8; off += 8 ) {
-        u8 cmd = r[off];
-        u32 d2 = be32( r + off + 4 );
-        switch( cmd ) {
-        case 0x08: /* ROOM_BEHAVIOR */
-            out->type = r[off + 1];
-            out->environmentType = (u8)d2;
-            out->lensMode = (u8)(( d2 >> 8 ) & 1u );
-            out->disableWarpSongs = (u8)(( d2 >> 10 ) & 1u );
-            out->hasBehavior = true;
-            break;
-        case 0x0A: /* ROOM_SHAPE */
-            if(( d2 >> 24 ) == 3 && ( d2 & 0xFFFFFF ) < size )
-                out->shapeOff = d2 & 0xFFFFFF;
-            break;
-        case 0x16: /* ECHO_SETTINGS */
-            out->echo = (s8)(u8)d2;
-            out->hasEcho = true;
-            break;
-        case 0x14: /* END */
-            return out->shapeOff != UINT32_MAX;
-        default:
-            break;
-        }
-    }
-    return false;
+    return liboot_scene_header_parse( s, size, layer, out, outFallback );
+}
+
+static bool walk_room_header( const u8 *r, size_t size, uint8_t layer,
+                              RoomHeader *out, bool *outFallback )
+{
+    return liboot_room_header_parse( r, size, layer, out, outFallback );
 }
 
 /* ---- collision relocation (serialized BE -> native, field by field) ---- */
@@ -383,6 +393,9 @@ typedef struct {
     Vec3s *vtx;
     CollisionPoly *poly;
     SurfaceType *surf;
+    SurfaceType *rawSurf;
+    u32 numSurf;
+    u8 maxExitIndex;
     WaterBox *wb;
     CollisionHeader hdr;
 } RelocCol;
@@ -392,6 +405,239 @@ static u32 seg2_off( u32 w ) { return (( w >> 24 ) == 2 ) ? ( w & 0xFFFFFF ) : U
 static bool span_in_bounds( size_t off, size_t count, size_t stride, size_t size )
 {
     return off <= size && stride != 0 && count <= ( size - off ) / stride;
+}
+
+static bool actor_catalog_append( struct OoTSceneActorEntry **entries,
+                                  uint32_t *count, uint32_t *capacity,
+                                  const u8 *blob, size_t blobSize,
+                                  uint32_t listOff, int numActors,
+                                  int16_t room, uint8_t source, uint8_t layer )
+{
+    struct OoTSceneActorEntry *grown;
+    uint32_t needed;
+    if( numActors <= 0 ) return true;
+    if( !span_in_bounds( listOff, (size_t)numActors, 0x10u, blobSize ) ||
+        (uint32_t)numActors > UINT32_MAX - *count )
+        return true; /* malformed optional metadata does not reject the scene */
+    needed = *count + (uint32_t)numActors;
+    if( needed > *capacity ) {
+        uint32_t next = *capacity != 0u ? *capacity : 16u;
+        while( next < needed ) {
+            if( next > UINT32_MAX / 2u ) { next = needed; break; }
+            next *= 2u;
+        }
+        grown = realloc( *entries, (size_t)next * sizeof( **entries ));
+        if( grown == NULL ) return false;
+        *entries = grown;
+        *capacity = next;
+    }
+    for( int i = 0; i < numActors; ++i ) {
+        const u8 *raw = blob + listOff + (size_t)i * 0x10u;
+        struct OoTSceneActorEntry *actor = &(*entries)[(*count)++];
+        memset( actor, 0, sizeof( *actor ));
+        actor->structSize = sizeof( *actor );
+        actor->version = OOT_SCENE_ACTOR_ENTRY_VERSION;
+        actor->actorId = be16s( raw );
+        actor->position[0] = (float)be16s( raw + 2u );
+        actor->position[1] = (float)be16s( raw + 4u );
+        actor->position[2] = (float)be16s( raw + 6u );
+        actor->rotation[0] = be16s( raw + 8u );
+        actor->rotation[1] = be16s( raw + 10u );
+        actor->rotation[2] = be16s( raw + 12u );
+        actor->params = be16s( raw + 14u );
+        actor->room = room;
+        actor->source = source;
+        actor->layer = layer;
+    }
+    return true;
+}
+
+static bool build_actor_catalog( const u8 *sceneBlob, size_t sceneSize,
+                                 const SceneHeader *sh, const u8 *primaryBlob,
+                                 size_t primarySize, const RoomHeader *primary,
+                                 int roomIndex, uint8_t layer,
+                                 struct OoTSceneActorEntry **outActors,
+                                 uint32_t *outCount )
+{
+    struct OoTSceneActorEntry *actors = NULL;
+    uint32_t count = 0u, capacity = 0u;
+    int primaryRoom = roomIndex == -1 ? 0 : roomIndex;
+
+    *outActors = NULL;
+    *outCount = 0u;
+    if( !actor_catalog_append( &actors, &count, &capacity, sceneBlob, sceneSize,
+                               sh->actorListOff, sh->numActors, -1,
+                               OOT_SCENE_ACTOR_SOURCE_SCENE, layer ) ||
+        !actor_catalog_append( &actors, &count, &capacity, primaryBlob, primarySize,
+                               primary->actorListOff, primary->numActors,
+                               (int16_t)primaryRoom,
+                               OOT_SCENE_ACTOR_SOURCE_ROOM, layer )) {
+        free( actors );
+        return false;
+    }
+
+    if( roomIndex == -1 ) {
+        for( int room = 1; room < sh->numRooms; ++room ) {
+            const u8 *file = sceneBlob + sh->roomListOff + (size_t)room * 8u;
+            size_t roomSize = 0u;
+            u8 *roomBlob = extract_vrom_file( be32( file ), be32( file + 4u ),
+                                              &roomSize );
+            RoomHeader rh;
+            bool ok = roomBlob != NULL &&
+                      walk_room_header( roomBlob, roomSize, layer, &rh, NULL );
+            if( ok )
+                ok = actor_catalog_append( &actors, &count, &capacity,
+                                           roomBlob, roomSize, rh.actorListOff,
+                                           rh.numActors, (int16_t)room,
+                                           OOT_SCENE_ACTOR_SOURCE_ROOM, layer );
+            free( roomBlob );
+            if( !ok ) { free( actors ); return false; }
+        }
+    }
+    *outActors = actors;
+    *outCount = count;
+    return true;
+}
+
+static void background_entries_free( struct OoTSceneBackground *entries,
+                                     uint32_t count )
+{
+    if( entries == NULL ) return;
+    for( uint32_t i = 0u; i < count; ++i ) {
+        free((void *)entries[i].imageBytes );
+        free((void *)entries[i].tlutBytes );
+    }
+    free( entries );
+}
+
+static void background_catalog_free( BackgroundCatalog *catalog )
+{
+    if( catalog == NULL ) return;
+    background_entries_free( catalog->entries, catalog->count );
+    memset( catalog, 0, sizeof( *catalog ));
+}
+
+static bool background_catalog_append( BackgroundCatalog *catalog,
+                                       const LibootRoomImageBackground *view,
+                                       int32_t roomIndex, uint8_t amountType )
+{
+    struct OoTSceneBackground *grown;
+    uint8_t *imageCopy = NULL;
+    uint8_t *tlutCopy = NULL;
+    size_t added;
+    if( view->imageByteCount > SIZE_MAX - view->tlutByteCount ) return false;
+    added = view->imageByteCount + view->tlutByteCount;
+    if( catalog->ownedBytes > BACKGROUND_CATALOG_MAX_BYTES ||
+        added > BACKGROUND_CATALOG_MAX_BYTES - catalog->ownedBytes )
+        return false;
+    if( catalog->count == catalog->capacity ) {
+        uint32_t next = catalog->capacity != 0u ? catalog->capacity * 2u : 8u;
+        if( next < catalog->capacity ||
+            (size_t)next > SIZE_MAX / sizeof( *catalog->entries ))
+            return false;
+        grown = realloc( catalog->entries,
+                         (size_t)next * sizeof( *catalog->entries ));
+        if( grown == NULL ) return false;
+        catalog->entries = grown;
+        catalog->capacity = next;
+    }
+    if( view->imageByteCount != 0u ) {
+        imageCopy = malloc( view->imageByteCount );
+        if( imageCopy == NULL ) return false;
+        memcpy( imageCopy, view->imageBytes, view->imageByteCount );
+    }
+    if( view->tlutByteCount != 0u ) {
+        tlutCopy = malloc( view->tlutByteCount );
+        if( tlutCopy == NULL ) { free( imageCopy ); return false; }
+        memcpy( tlutCopy, view->tlutBytes, view->tlutByteCount );
+    }
+
+    struct OoTSceneBackground *entry = &catalog->entries[catalog->count++];
+    memset( entry, 0, sizeof( *entry ));
+    entry->structSize = sizeof( *entry );
+    entry->version = OOT_SCENE_BACKGROUND_VERSION;
+    entry->roomIndex = roomIndex;
+    entry->cameraIndex = view->cameraIndex;
+    entry->amountType = amountType;
+    entry->encoding = view->encoding;
+    entry->width = view->width;
+    entry->height = view->height;
+    entry->format = view->format;
+    entry->size = view->size;
+    entry->tlutMode = view->tlutMode;
+    entry->tlutCount = view->tlutCount;
+    entry->entryFlags = view->entryFlags;
+    entry->sourceAddress = view->sourceAddress;
+    entry->tlutAddress = view->tlutAddress;
+    entry->sourceMetadata = view->sourceMetadata;
+    entry->imageBytes = imageCopy;
+    entry->imageByteCount = view->imageByteCount;
+    entry->tlutBytes = tlutCopy;
+    entry->tlutByteCount = view->tlutByteCount;
+    catalog->ownedBytes += added;
+    return true;
+}
+
+static bool background_catalog_add_room( BackgroundCatalog *catalog,
+                                         const u8 *sceneBlob, size_t sceneSize,
+                                         const u8 *roomBlob, size_t roomSize,
+                                         const RoomHeader *roomHeader,
+                                         int32_t roomIndex )
+{
+    LibootRoomImageHeader image;
+    if( roomHeader->shapeOff >= roomSize ) return false;
+    if( roomBlob[roomHeader->shapeOff] != 1u ) return true;
+    if( !liboot_room_image_header_parse( roomBlob, roomSize,
+                                         roomHeader->shapeOff, &image ))
+        return false;
+    for( uint32_t i = 0u; i < image.numBackgrounds; ++i ) {
+        LibootRoomImageBackground view;
+        if( !liboot_room_image_background_get( sceneBlob, sceneSize,
+                                                roomBlob, roomSize, &image, i,
+                                                &view ) ||
+            !background_catalog_append( catalog, &view, roomIndex,
+                                         image.amountType ))
+            return false;
+    }
+    return true;
+}
+
+static bool build_background_catalog( const u8 *sceneBlob, size_t sceneSize,
+                                      const SceneHeader *sceneHeader,
+                                      const u8 *primaryBlob, size_t primarySize,
+                                      const RoomHeader *primaryHeader,
+                                      int roomIndex, uint8_t layer,
+                                      BackgroundCatalog *out )
+{
+    int primaryRoom = roomIndex == -1 ? 0 : roomIndex;
+    memset( out, 0, sizeof( *out ));
+    if( !background_catalog_add_room( out, sceneBlob, sceneSize, primaryBlob,
+                                      primarySize, primaryHeader,
+                                      primaryRoom ))
+        goto fail;
+    if( roomIndex == -1 ) {
+        for( int room = 1; room < sceneHeader->numRooms; ++room ) {
+            const u8 *file = sceneBlob + sceneHeader->roomListOff +
+                             (size_t)room * 8u;
+            size_t otherSize = 0u;
+            u8 *other = extract_vrom_file( be32( file ), be32( file + 4u ),
+                                           &otherSize );
+            RoomHeader otherHeader;
+            bool ok = other != NULL &&
+                      walk_room_header( other, otherSize, layer, &otherHeader,
+                                        NULL ) &&
+                      background_catalog_add_room( out, sceneBlob, sceneSize,
+                                                   other, otherSize,
+                                                   &otherHeader, room );
+            free( other );
+            if( !ok ) goto fail;
+        }
+    }
+    return true;
+
+fail:
+    background_catalog_free( out );
+    return false;
 }
 
 static bool relocate_collision( const u8 *scn, size_t size, u32 colOff, RelocCol *out )
@@ -448,11 +694,17 @@ static bool relocate_collision( const u8 *scn, size_t size, u32 colOff, RelocCol
     u32 nSurf = (u32)maxType + 1;
     if( !span_in_bounds( surfOff, nSurf, 8, size )) { free( vtx ); free( poly ); return false; }
     SurfaceType *surf = calloc( nSurf, sizeof( SurfaceType ));
-    if( !surf ) { free( vtx ); free( poly ); return false; }
+    SurfaceType *rawSurf = calloc( nSurf, sizeof( SurfaceType ));
+    if( !surf || !rawSurf ) {
+        free( vtx ); free( poly ); free( surf ); free( rawSurf );
+        return false;
+    }
     for( u32 i = 0; i < nSurf; ++i ) {
         const u8 *p = scn + surfOff + (size_t)i * 8;
         u32 d0 = be32( p );
         u32 d1 = be32( p + 4 );
+        rawSurf[i].data[0] = d0;
+        rawSurf[i].data[1] = d1;
         /* ALWAYS clear exitIndex (bits 8-12): the vendored Player indexes
            play->exitList (NULL in the fake play state) every grounded frame
            a nonzero exit is underfoot -> segfault */
@@ -469,11 +721,19 @@ static bool relocate_collision( const u8 *scn, size_t size, u32 colOff, RelocCol
         surf[i].data[0] = d0;
         surf[i].data[1] = d1;  /* material/sfx, conveyor, canHookshot: keep whole */
     }
+    u8 maxExitIndex = 0u;
+    for( u16 i = 0; i < np; ++i ) {
+        u8 exitIndex = (u8)(( rawSurf[poly[i].type].data[0] >> 8 ) & 0x1Fu );
+        if( exitIndex > maxExitIndex ) maxExitIndex = exitIndex;
+    }
 
     WaterBox *wb = NULL;
     if( nwb ) {
         wb = calloc( nwb, sizeof( WaterBox ));
-        if( !wb ) { free( vtx ); free( poly ); free( surf ); return false; }
+        if( !wb ) {
+            free( vtx ); free( poly ); free( surf ); free( rawSurf );
+            return false;
+        }
         for( u16 i = 0; i < nwb; ++i ) {
             const u8 *p = scn + wbOff + (size_t)i * 0x10;
             wb[i].xMin = be16s( p );
@@ -490,6 +750,9 @@ static bool relocate_collision( const u8 *scn, size_t size, u32 colOff, RelocCol
     out->vtx = vtx;
     out->poly = poly;
     out->surf = surf;
+    out->rawSurf = rawSurf;
+    out->numSurf = nSurf;
+    out->maxExitIndex = maxExitIndex;
     out->wb = wb;
 
     CollisionHeader *hdr = &out->hdr;
@@ -506,6 +769,32 @@ static bool relocate_collision( const u8 *scn, size_t size, u32 colOff, RelocCol
     hdr->numWaterBoxes = nwb;
     hdr->waterBoxes = wb;
     return true;
+}
+
+static void reloc_collision_free( RelocCol *col )
+{
+    if( col == NULL ) return;
+    free( col->vtx );
+    free( col->poly );
+    free( col->surf );
+    free( col->rawSurf );
+    free( col->wb );
+    memset( col, 0, sizeof( *col ));
+}
+
+static int16_t *parse_exit_list( const u8 *blob, size_t size,
+                                 const SceneHeader *header, u8 count )
+{
+    int16_t *exits;
+    if( count == 0u ) return NULL;
+    if( !header->hasExitList ||
+        !span_in_bounds( header->exitListOff, count, 2u, size ))
+        return NULL;
+    exits = malloc( (size_t)count * sizeof( *exits ));
+    if( exits == NULL ) return NULL;
+    for( u8 i = 0u; i < count; ++i )
+        exits[i] = be16s( blob + header->exitListOff + (size_t)i * 2u );
+    return exits;
 }
 
 /* z_bgcheck uses a fixed retail-era memory budget and aborts when the static
@@ -644,12 +933,13 @@ static bool mesh_run_pass( const u8 *room, size_t size, u32 shapeOff, int pass )
         stride = 0x10;
         dlOff = 8;
         break;
-    case 1: { /* RoomShapeImage: single variant only; the JPEG background is
-                 not decoded, the entry's opa DL is real renderable geometry */
-        if( shapeOff + 8 > size ) return false;
-        if( room[shapeOff + 1] != 1 ) return false; /* multi variant: v1 unsupported */
+    case 1: { /* RoomShapeImage: single and multi share one real 3D DL pair;
+                 their 2D background catalog is parsed independently. */
+        LibootRoomImageHeader image;
+        if( !liboot_room_image_header_parse( room, size, shapeOff, &image ))
+            return false;
         count = 1;
-        entriesOff = be32( room + shapeOff + 4 );
+        entriesOff = image.displayListEntryAddress;
         stride = 8;
         dlOff = 0;
         break;
@@ -674,36 +964,60 @@ static bool mesh_run_pass( const u8 *room, size_t size, u32 shapeOff, int pass )
 
 static bool ensure_scene_buffers( void )
 {
-    if( s_scene.pos ) return true;
-    s_scene.pos = malloc( OOT_SCENE_MAX_TRIANGLES * 9 * sizeof( float ));
-    s_scene.nrm = malloc( OOT_SCENE_MAX_TRIANGLES * 9 * sizeof( float ));
-    s_scene.col = malloc( OOT_SCENE_MAX_TRIANGLES * 9 * sizeof( float ));
-    s_scene.uv = malloc( OOT_SCENE_MAX_TRIANGLES * 6 * sizeof( float ));
-    s_scene.triTex = malloc( OOT_SCENE_MAX_TRIANGLES * sizeof( uint16_t ));
-    s_scene.alpha = malloc( OOT_SCENE_MAX_TRIANGLES * 3 * sizeof( float ));
-    s_scene.triFlags = malloc( OOT_SCENE_MAX_TRIANGLES * sizeof( uint8_t ));
-    return s_scene.pos && s_scene.nrm && s_scene.col && s_scene.uv &&
-           s_scene.triTex && s_scene.alpha && s_scene.triFlags;
+    uint32_t capacity = sSceneGeometryCapacity;
+    float *pos, *nrm, *col, *uv, *alpha;
+    uint16_t *triTex;
+    uint8_t *triFlags;
+    struct OoTGeometryBatch *batches;
+
+    if( s_scene.pos && s_scene.allocatedGeometryCapacity == capacity ) return true;
+    pos = malloc((size_t)capacity * 9u * sizeof( float ));
+    nrm = malloc((size_t)capacity * 9u * sizeof( float ));
+    col = malloc((size_t)capacity * 9u * sizeof( float ));
+    uv = malloc((size_t)capacity * 6u * sizeof( float ));
+    triTex = malloc((size_t)capacity * sizeof( uint16_t ));
+    alpha = malloc((size_t)capacity * 3u * sizeof( float ));
+    triFlags = malloc((size_t)capacity * sizeof( uint8_t ));
+    batches = malloc((size_t)capacity * sizeof( *batches ));
+    if( !pos || !nrm || !col || !uv || !triTex || !alpha || !triFlags || !batches ) {
+        free( pos ); free( nrm ); free( col ); free( uv );
+        free( triTex ); free( alpha ); free( triFlags ); free( batches );
+        return false;
+    }
+    free( s_scene.pos ); free( s_scene.nrm ); free( s_scene.col ); free( s_scene.uv );
+    free( s_scene.triTex ); free( s_scene.alpha ); free( s_scene.triFlags );
+    free( s_scene.batches );
+    s_scene.pos = pos; s_scene.nrm = nrm; s_scene.col = col; s_scene.uv = uv;
+    s_scene.triTex = triTex; s_scene.alpha = alpha; s_scene.triFlags = triFlags;
+    s_scene.batches = batches;
+    s_scene.allocatedGeometryCapacity = capacity;
+    return true;
 }
 
 static bool interpret_room_mesh( void )
 {
     RoomHeader rh;
-    if( !walk_room_header( s_scene.roomBlob, s_scene.roomSize, &rh ))
+    if( !walk_room_header( s_scene.roomBlob, s_scene.roomSize, s_scene.layer,
+                           &rh, NULL ))
         return false;
     if( !ensure_scene_buffers() ) return false;
 
     struct OoTLinkGeometryBuffers buf = {
         s_scene.pos, s_scene.nrm, s_scene.col, s_scene.uv, s_scene.triTex, 0,
-        s_scene.alpha, s_scene.triFlags
+        s_scene.alpha, s_scene.triFlags, s_scene.allocatedGeometryCapacity, 0,
+        s_scene.batches, s_scene.allocatedGeometryCapacity, 0
     };
-    liboot_scene_dl_begin( &buf, OOT_SCENE_MAX_TRIANGLES );
+    liboot_scene_dl_begin( &buf, (int)s_scene.allocatedGeometryCapacity );
 
+    liboot_scene_dl_set_source( s_scene.curRoom, 0 );
     bool ok = mesh_run_pass( s_scene.roomBlob, s_scene.roomSize, rh.shapeOff, 0 );
-    s_scene.xluStart = buf.numTrianglesUsed;
-    if( ok )
+    s_scene.xluStart = buf.numTrianglesUsed32;
+    if( ok ) {
+        liboot_scene_dl_set_source( s_scene.curRoom, 1 );
         mesh_run_pass( s_scene.roomBlob, s_scene.roomSize, rh.shapeOff, 1 );
-    s_scene.numTris = buf.numTrianglesUsed;
+    }
+    s_scene.numTris = buf.numTrianglesUsed32;
+    s_scene.numBatches = buf.numBatchesUsed;
     return ok;
 }
 
@@ -722,27 +1036,30 @@ static bool interpret_all_rooms( const u8 *scn, size_t scnSize, u32 roomListOff,
 
     struct OoTLinkGeometryBuffers buf = {
         s_scene.pos, s_scene.nrm, s_scene.col, s_scene.uv, s_scene.triTex, 0,
-        s_scene.alpha, s_scene.triFlags
+        s_scene.alpha, s_scene.triFlags, s_scene.allocatedGeometryCapacity, 0,
+        s_scene.batches, s_scene.allocatedGeometryCapacity, 0
     };
-    liboot_scene_dl_begin( &buf, OOT_SCENE_MAX_TRIANGLES );
+    liboot_scene_dl_begin( &buf, (int)s_scene.allocatedGeometryCapacity );
 
     for( int pass = 0; pass < 2; ++pass ) {
-        if( pass == 1 ) s_scene.xluStart = buf.numTrianglesUsed;
+        if( pass == 1 ) s_scene.xluStart = buf.numTrianglesUsed32;
         for( int i = 0; i < numRooms; ++i ) {
             const u8 *rf = scn + roomListOff + (size_t)i * 8;
             size_t rs = 0;
             u8 *rb = extract_vrom_file( be32( rf ), be32( rf + 4 ), &rs );
             if( !rb ) continue;   /* skip an unreadable room, keep the rest */
             RoomHeader rh;
-            if( walk_room_header( rb, rs, &rh )) {
+            if( walk_room_header( rb, rs, s_scene.layer, &rh, NULL )) {
                 liboot_gfx_set_room( i );   /* key this room's seg-3 textures */
+                liboot_scene_dl_set_source( i, pass );
                 liboot_register_segment_span( 3, rb, rs );
                 mesh_run_pass( rb, rs, rh.shapeOff, pass );
             }
             free( rb );
         }
     }
-    s_scene.numTris = buf.numTrianglesUsed;
+    s_scene.numTris = buf.numTrianglesUsed32;
+    s_scene.numBatches = buf.numBatchesUsed;
     return s_scene.numTris > 0;
 }
 
@@ -769,21 +1086,116 @@ static void apply_scene_runtime( PlayState *play, int32_t sceneIndex,
     play->sceneId = sceneIndex;
     R_SCENE_CAM_TYPE = sh->sceneCamType;
     gSaveContext.worldMapArea = sh->worldMapArea;
+    liboot_host_actor_sync_room();
+}
+
+/* Host-build hook called before the retail exit/void state machine mutates
+ * Player. ROM surface exit/void bits stay masked in the live CollisionContext;
+ * this consults the preserved originals and turns them into pollable events. */
+s32 liboot_world_transition_intercept( PlayState *play, Player *player,
+                                       CollisionPoly *poly, u32 bgId )
+{
+    uint32_t kind = 0u;
+    int16_t exitIndex = 0;
+    int16_t entranceIndex = -1;
+    uint8_t floorProperty = 0u;
+
+    if( play == NULL || player == NULL ||
+        player->actor.category != ACTORCAT_PLAYER )
+        return false;
+
+    if( s_scene.sceneBlob != NULL && poly != NULL && bgId == BGCHECK_SCENE &&
+        s_scene.colRawSurf != NULL && poly->type < s_scene.numColSurf ) {
+        uint32_t raw = s_scene.colRawSurf[poly->type].data[0];
+        float floorDistance = player->actor.world.pos.y - player->actor.floorHeight;
+        bool grounded = ( player->actor.bgCheckFlags & BGCHECKFLAG_GROUND ) != 0;
+        bool nearFloor = grounded || floorDistance <= 100.0f;
+        exitIndex = (int16_t)(( raw >> 8 ) & 0x1Fu );
+        floorProperty = (uint8_t)(( raw >> 26 ) & 0xFu );
+
+        if( exitIndex > 0 && exitIndex <= s_scene.numExits && nearFloor ) {
+            kind = OOT_WORLD_EVENT_SCENE_EXIT;
+            entranceIndex = s_scene.exits[exitIndex - 1];
+        } else if(( floorProperty == 5u || floorProperty == 12u ) &&
+                  ( nearFloor || player->fallDistance > 400.0f ||
+                    ( play->sceneId != SCENE_SHADOW_TEMPLE &&
+                      player->fallDistance > 200.0f ))) {
+            kind = OOT_WORLD_EVENT_VOID_SURFACE;
+            exitIndex = 0;
+        }
+    }
+
+    /* Match the two non-surface branches in Player_HandleExitsAndVoids. The
+       collapsing-tower exterior starts its recovery before Link can reach the
+       global -4000 plane. */
+    if( kind == 0u &&
+        ( player->actor.world.pos.y < -4000.0f ||
+          ( play->sceneId == SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR &&
+            player->fallDistance > 320.0f ))) {
+        kind = OOT_WORLD_EVENT_VOID_Y;
+        exitIndex = 0;
+        floorProperty = 0u;
+    }
+
+    if( kind == 0u ) {
+        s_worldEvents.contactKind = 0u;
+        s_worldEvents.contactExitIndex = 0;
+        s_worldEvents.contactFloorProperty = 0u;
+        return false;
+    }
+
+    if( s_worldEvents.contactKind != kind ||
+        s_worldEvents.contactExitIndex != exitIndex ||
+        s_worldEvents.contactFloorProperty != floorProperty ) {
+        if( world_event_push( kind, exitIndex, entranceIndex, floorProperty,
+                              play, player )) {
+            s_worldEvents.contactKind = kind;
+            s_worldEvents.contactExitIndex = exitIndex;
+            s_worldEvents.contactFloorProperty = floorProperty;
+        }
+    }
+    return true;
 }
 
 /* ---- public API ---------------------------------------------------- */
-int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
+bool oot_scene_set_geometry_capacity( uint32_t triangleCapacity )
 {
+    if( s_scene.sceneBlob ) return false;
+    if( triangleCapacity == 0u ) triangleCapacity = OOT_SCENE_MAX_TRIANGLES;
+    if( triangleCapacity > OOT_GEO_MAX_CONFIGURABLE_TRIANGLES ) return false;
+    sSceneGeometryCapacity = triangleCapacity;
+    return true;
+}
+
+void liboot_scene_reset_geometry_capacity( void )
+{
+    sSceneGeometryCapacity = OOT_SCENE_MAX_TRIANGLES;
+}
+
+int32_t oot_scene_load_ex( const struct OoTSceneLoadOptions *options )
+{
+    if( options == NULL ||
+        options->structSize < sizeof(struct OoTSceneLoadOptions) ||
+        options->layer > OOT_SCENE_LAYER_ADULT_NIGHT )
+        return -10;
+    int32_t sceneIndex = options->sceneIndex;
+    int32_t roomIndex = options->roomIndex;
+    uint8_t layer = options->layer;
     if( !scene_table_init() ) return -1;
     if( sceneIndex < 0 || sceneIndex >= s_scene.tableCount ) return -2;
 
     const u8 *entry = s_scene.table + (size_t)sceneIndex * SCENE_TABLE_ENTRY;
+    uint8_t drawConfigId = entry[0x11u];
     size_t sceneSize, roomSize;
     u8 *sceneBlob = extract_vrom_file( be32( entry ), be32( entry + 4 ), &sceneSize );
     if( !sceneBlob ) return -3;
 
     SceneHeader sh;
-    if( !walk_scene_header( sceneBlob, sceneSize, &sh )) { free( sceneBlob ); return -4; }
+    bool sceneFallback = false;
+    if( !walk_scene_header( sceneBlob, sceneSize, layer, &sh, &sceneFallback )) {
+        free( sceneBlob );
+        return -4;
+    }
     /* roomIndex == -1 loads the whole scene (all rooms). Room 0 is the primary
        room kept as segment 3 for gameplay; every room is interpreted below. */
     int fullScene = ( roomIndex == -1 );
@@ -804,27 +1216,62 @@ int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
         free( sceneBlob ); free( roomBlob );
         return -7;
     }
+    int16_t *exits = parse_exit_list( sceneBlob, sceneSize, &sh,
+                                      rc.maxExitIndex );
+    if( rc.maxExitIndex != 0u && exits == NULL ) {
+        reloc_collision_free( &rc );
+        free( sceneBlob ); free( roomBlob );
+        return -7;
+    }
     if( !liboot_bgcheck_preflight( &rc.hdr )) {
-        free( rc.vtx ); free( rc.poly ); free( rc.surf ); free( rc.wb );
+        reloc_collision_free( &rc );
+        free( exits );
         free( sceneBlob ); free( roomBlob );
         return -7;
     }
 
     /* room shape must be parsable before we commit anything */
     RoomHeader rh;
-    if( !walk_room_header( roomBlob, roomSize, &rh )) {
-        free( rc.vtx ); free( rc.poly ); free( rc.surf ); free( rc.wb );
+    bool roomFallback = false;
+    if( !walk_room_header( roomBlob, roomSize, layer, &rh, &roomFallback )) {
+        reloc_collision_free( &rc );
+        free( exits );
         free( sceneBlob ); free( roomBlob );
         return -8;
     }
+    struct OoTSceneActorEntry *actors = NULL;
+    uint32_t numActors = 0u;
+    if( !build_actor_catalog( sceneBlob, sceneSize, &sh, roomBlob, roomSize,
+                              &rh, roomIndex, layer, &actors, &numActors )) {
+        reloc_collision_free( &rc );
+        free( exits );
+        free( sceneBlob ); free( roomBlob );
+        return -11;
+    }
+    BackgroundCatalog backgrounds;
+    if( !build_background_catalog( sceneBlob, sceneSize, &sh, roomBlob,
+                                   roomSize, &rh, roomIndex, layer,
+                                   &backgrounds )) {
+        free( actors );
+        reloc_collision_free( &rc );
+        free( exits );
+        free( sceneBlob ); free( roomBlob );
+        return -12;
+    }
 
     /* ---- commit: replace the previous scene ---- */
+    world_events_clear();
     liboot_register_segment_span( 2, sceneBlob, sceneSize );
     liboot_register_segment_span( 3, roomBlob, roomSize );
     free( s_scene.sceneBlob );
     free( s_scene.roomBlob );
+    free( s_scene.actors );
+    background_entries_free( s_scene.backgrounds, s_scene.numBackgrounds );
     s_scene.sceneBlob = sceneBlob; s_scene.sceneSize = sceneSize;
     s_scene.roomBlob = roomBlob;   s_scene.roomSize = roomSize;
+    s_scene.actors = actors; s_scene.numActors = numActors;
+    s_scene.backgrounds = backgrounds.entries;
+    s_scene.numBackgrounds = backgrounds.count;
     s_scene.playerEntryOff = sh.playerEntryOff;
     s_scene.spawnListOff = sh.spawnListOff;
     s_scene.numRooms = sh.numRooms;
@@ -836,12 +1283,20 @@ int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
     apply_scene_environment( sceneBlob, sceneSize, &sh );
     s_scene.curScene = sceneIndex;
     s_scene.curRoom = roomIndex;
+    s_scene.layer = layer;
+    s_scene.layerFallback = sceneFallback || roomFallback;
+    s_scene.drawConfigId = drawConfigId;
 
     free( s_scene.colVtx ); free( s_scene.colPoly );
-    free( s_scene.colSurf ); free( s_scene.colWb );
+    free( s_scene.colSurf ); free( s_scene.colRawSurf );
+    free( s_scene.colWb ); free( s_scene.exits );
     s_scene.colVtx = rc.vtx;
     s_scene.colPoly = rc.poly;
     s_scene.colSurf = rc.surf;
+    s_scene.colRawSurf = rc.rawSurf;
+    s_scene.numColSurf = rc.numSurf;
+    s_scene.exits = exits;
+    s_scene.numExits = rc.maxExitIndex;
     s_scene.colWb = rc.wb;
     s_scene.colHeader = rc.hdr;
 
@@ -851,10 +1306,15 @@ int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
     liboot_reset_tha();   /* z_bgcheck is the only THA user: drop its old tables */
     BgCheck_Allocate( &play->colCtx, play, &s_scene.colHeader );
     liboot_invalidate_actor_bg_cache( play );
+    liboot_dynamic_collision_rebind_all();
     /* The generic scene-0 values above are an allocation-only compatibility
        shim for liboot_bgcheck_preflight's deterministic host budget. Gameplay
        must observe the real scene and active room immediately afterward. */
     apply_scene_runtime( play, sceneIndex, primaryRoom, &sh, &rh );
+    play->sceneDrawConfig = drawConfigId;
+    gSaveContext.sceneLayer = layer;
+    gSaveContext.save.nightFlag = ( layer == OOT_SCENE_LAYER_CHILD_NIGHT ||
+                                    layer == OOT_SCENE_LAYER_ADULT_NIGHT );
 
     /* falling past the hardcoded y < -4000 void plane latches
        play->transitionTrigger = TRANS_TRIGGER_START (z_player.c void-out),
@@ -867,7 +1327,7 @@ int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
     /* stale seg-2/3 texture cache entries would alias the new files */
     liboot_gfx_evict_scene();
 
-    s_scene.numTris = s_scene.xluStart = 0;
+    s_scene.numTris = s_scene.xluStart = s_scene.numBatches = 0;
     bool meshOk;
     if( fullScene ) {
         meshOk = interpret_all_rooms( s_scene.sceneBlob, s_scene.sceneSize,
@@ -884,6 +1344,127 @@ int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
     return 0;
 }
 
+int32_t oot_scene_load( int32_t sceneIndex, int32_t roomIndex )
+{
+    const struct OoTSceneLoadOptions options = {
+        sizeof(struct OoTSceneLoadOptions),
+        sceneIndex,
+        roomIndex,
+        OOT_SCENE_LAYER_CHILD_DAY,
+        { 0u, 0u, 0u }
+    };
+    return oot_scene_load_ex( &options );
+}
+
+bool oot_scene_get_active_layer( uint8_t *outLayer, bool *outUsedFallback )
+{
+    if( outLayer != NULL ) *outLayer = OOT_SCENE_LAYER_CHILD_DAY;
+    if( outUsedFallback != NULL ) *outUsedFallback = false;
+    if( s_scene.sceneBlob == NULL ) return false;
+    if( outLayer != NULL ) *outLayer = s_scene.layer;
+    if( outUsedFallback != NULL ) *outUsedFallback = s_scene.layerFallback;
+    return true;
+}
+
+int32_t oot_scene_get_background_count( void )
+{
+    return s_scene.sceneBlob != NULL && s_scene.numBackgrounds <= INT32_MAX
+               ? (int32_t)s_scene.numBackgrounds : 0;
+}
+
+bool oot_scene_get_background( int32_t index,
+                               struct OoTSceneBackground *outBackground )
+{
+    if( outBackground == NULL ||
+        outBackground->structSize < sizeof( *outBackground ) ||
+        outBackground->version != OOT_SCENE_BACKGROUND_VERSION ||
+        index < 0 || (uint32_t)index >= s_scene.numBackgrounds ||
+        s_scene.backgrounds == NULL )
+        return false;
+    *outBackground = s_scene.backgrounds[index];
+    return true;
+}
+
+bool oot_scene_get_material_state( struct OoTSceneMaterialState *outState )
+{
+    if( outState == NULL || outState->structSize < sizeof( *outState ) ||
+        outState->version != OOT_SCENE_MATERIAL_STATE_VERSION ||
+        s_scene.sceneBlob == NULL )
+        return false;
+    memset( outState, 0, sizeof( *outState ));
+    outState->structSize = sizeof( *outState );
+    outState->version = OOT_SCENE_MATERIAL_STATE_VERSION;
+    outState->simulationFrame = liboot_play()->gameplayFrames;
+    outState->referenceCount = liboot_scene_material_reference_count();
+    outState->segmentMask = liboot_scene_material_segment_mask();
+    outState->drawConfigId = s_scene.drawConfigId;
+    outState->referencesTruncated = liboot_scene_material_references_truncated();
+    return true;
+}
+
+bool oot_scene_get_material_reference(
+    int32_t index, struct OoTSceneMaterialReference *outReference )
+{
+    if( outReference == NULL ||
+        outReference->structSize < sizeof( *outReference ) ||
+        outReference->version != OOT_SCENE_MATERIAL_REFERENCE_VERSION ||
+        index < 0 || s_scene.sceneBlob == NULL )
+        return false;
+    return liboot_scene_material_reference_get((uint32_t)index, outReference );
+}
+
+int32_t oot_scene_get_actor_count( void )
+{
+    return s_scene.sceneBlob != NULL && s_scene.numActors <= INT32_MAX
+               ? (int32_t)s_scene.numActors : 0;
+}
+
+bool oot_scene_get_actor( int32_t index, struct OoTSceneActorEntry *outEntry )
+{
+    if( outEntry == NULL || outEntry->structSize < sizeof( *outEntry ) ||
+        outEntry->version != OOT_SCENE_ACTOR_ENTRY_VERSION || index < 0 ||
+        (uint32_t)index >= s_scene.numActors || s_scene.actors == NULL )
+        return false;
+    *outEntry = s_scene.actors[index];
+    return true;
+}
+
+int32_t oot_scene_get_exit_count( void )
+{
+    return s_scene.sceneBlob != NULL ? s_scene.numExits : 0;
+}
+
+bool oot_scene_get_exit( int32_t index, int16_t *outEntranceIndex )
+{
+    if( outEntranceIndex != NULL ) *outEntranceIndex = -1;
+    if( outEntranceIndex == NULL || s_scene.sceneBlob == NULL ||
+        index < 0 || index >= s_scene.numExits || s_scene.exits == NULL )
+        return false;
+    *outEntranceIndex = s_scene.exits[index];
+    return true;
+}
+
+bool oot_world_event_poll( struct OoTWorldEvent *outEvent )
+{
+    if( outEvent == NULL || outEvent->structSize < sizeof( *outEvent ) ||
+        outEvent->version != OOT_WORLD_EVENT_VERSION ||
+        s_worldEvents.count == 0u )
+        return false;
+    *outEvent = s_worldEvents.queue[s_worldEvents.head];
+    s_worldEvents.head = ( s_worldEvents.head + 1u ) % WORLD_EVENT_QUEUE_CAPACITY;
+    s_worldEvents.count--;
+    return true;
+}
+
+void liboot_world_events_observe_pose( float y )
+{
+    if( y >= -4000.0f && s_worldEvents.contactKind == OOT_WORLD_EVENT_VOID_Y ) {
+        s_worldEvents.contactKind = 0u;
+        s_worldEvents.contactExitIndex = 0;
+        s_worldEvents.contactFloorProperty = 0u;
+    }
+}
+
 bool oot_scene_get_geometry( const float **position, const float **normal,
                              const float **color, const float **uv,
                              const uint16_t **triTexture,
@@ -897,6 +1478,15 @@ bool oot_scene_get_geometry( const float **position, const float **normal,
     if( triTexture )  *triTexture = s_scene.triTex;
     if( numTriangles )     *numTriangles = s_scene.numTris;
     if( xluStartTriangle ) *xluStartTriangle = s_scene.xluStart;
+    return true;
+}
+
+bool oot_scene_get_geometry_batches( const struct OoTGeometryBatch **batches,
+                                     uint32_t *numBatches )
+{
+    if( !s_scene.roomBlob || !s_scene.batches ) return false;
+    if( batches ) *batches = s_scene.batches;
+    if( numBatches ) *numBatches = s_scene.numBatches;
     return true;
 }
 
@@ -926,7 +1516,9 @@ int32_t oot_scene_set_room( int32_t roomIndex )
     if( !s_scene.sceneBlob || s_scene.curScene < 0 ) return -1;
 
     SceneHeader sh;
-    if( !walk_scene_header( s_scene.sceneBlob, s_scene.sceneSize, &sh )) return -4;
+    bool sceneFallback = false;
+    if( !walk_scene_header( s_scene.sceneBlob, s_scene.sceneSize, s_scene.layer,
+                            &sh, &sceneFallback )) return -4;
     int fullScene = roomIndex == -1;
     int primaryRoom = fullScene ? 0 : roomIndex;
     if(( !fullScene && ( roomIndex < 0 || roomIndex >= sh.numRooms )) ||
@@ -940,26 +1532,53 @@ int32_t oot_scene_set_room( int32_t roomIndex )
     if( !roomBlob ) return -6;
 
     RoomHeader rh;
-    if( !walk_room_header( roomBlob, roomSize, &rh )) {
+    bool roomFallback = false;
+    if( !walk_room_header( roomBlob, roomSize, s_scene.layer, &rh,
+                           &roomFallback )) {
         free( roomBlob );
         return -8;
+    }
+    struct OoTSceneActorEntry *actors = NULL;
+    uint32_t numActors = 0u;
+    if( !build_actor_catalog( s_scene.sceneBlob, s_scene.sceneSize, &sh,
+                              roomBlob, roomSize, &rh, roomIndex,
+                              s_scene.layer, &actors, &numActors )) {
+        free( roomBlob );
+        return -11;
+    }
+    BackgroundCatalog backgrounds;
+    if( !build_background_catalog( s_scene.sceneBlob, s_scene.sceneSize, &sh,
+                                   roomBlob, roomSize, &rh, roomIndex,
+                                   s_scene.layer, &backgrounds )) {
+        free( actors );
+        free( roomBlob );
+        return -12;
     }
 
     /* All fallible extraction/header validation completed. Replace only the
        room blob/runtime/mesh; s_scene.col* and play->colCtx remain untouched. */
+    world_events_clear();
     liboot_gfx_evict_scene();
     liboot_register_segment_span( 3, roomBlob, roomSize );
     free( s_scene.roomBlob );
+    free( s_scene.actors );
+    background_entries_free( s_scene.backgrounds, s_scene.numBackgrounds );
     s_scene.roomBlob = roomBlob;
     s_scene.roomSize = roomSize;
+    s_scene.actors = actors;
+    s_scene.numActors = numActors;
+    s_scene.backgrounds = backgrounds.entries;
+    s_scene.numBackgrounds = backgrounds.count;
     s_scene.curRoom = roomIndex;
     s_scene.roomMetadataValid = rh.hasBehavior && rh.hasEcho;
+    s_scene.layerFallback = sceneFallback || roomFallback;
 
     PlayState *play = liboot_play();
     apply_scene_runtime( play, s_scene.curScene, primaryRoom, &sh, &rh );
+    play->sceneDrawConfig = s_scene.drawConfigId;
     play->transitionTrigger = TRANS_TRIGGER_OFF;
 
-    s_scene.numTris = s_scene.xluStart = 0;
+    s_scene.numTris = s_scene.xluStart = s_scene.numBatches = 0;
     bool meshOk;
     if( fullScene ) {
         meshOk = interpret_all_rooms( s_scene.sceneBlob, s_scene.sceneSize,
@@ -1075,15 +1694,20 @@ bool oot_scene_spawn( int32_t spawnIndex, float outPos[3], int16_t *outYaw )
 /* oot_global_terminate hook (called from liboot.c) */
 void liboot_scene_terminate( void )
 {
+    world_events_clear();
     liboot_register_segment_span( 2, NULL, 0 );
     liboot_register_segment_span( 3, NULL, 0 );
     free( s_scene.table );
     free( s_scene.pairs );
     free( s_scene.sceneBlob );
     free( s_scene.roomBlob );
+    free( s_scene.actors );
+    background_entries_free( s_scene.backgrounds, s_scene.numBackgrounds );
     free( s_scene.colVtx );
     free( s_scene.colPoly );
     free( s_scene.colSurf );
+    free( s_scene.colRawSurf );
+    free( s_scene.exits );
     free( s_scene.colWb );
     free( s_scene.pos );
     free( s_scene.nrm );
@@ -1092,5 +1716,6 @@ void liboot_scene_terminate( void )
     free( s_scene.triTex );
     free( s_scene.alpha );
     free( s_scene.triFlags );
+    free( s_scene.batches );
     memset( &s_scene, 0, sizeof( s_scene ));
 }

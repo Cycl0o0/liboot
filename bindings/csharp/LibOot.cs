@@ -25,6 +25,10 @@ namespace LibOot
         SceneGeometryUnavailable = -14,
         NoFrame = -15,
         NotAvailable = -16,
+        DynamicCollisionCapacity = -17,
+        DynamicCollisionNotFound = -18,
+        HostActorCapacity = -19,
+        HostActorNotFound = -20,
     }
 
     public enum Age : byte
@@ -140,6 +144,78 @@ namespace LibOot
         FixedStep = 1ul << 8,
         Audio = 1ul << 9,
         ProcessSingleton = 1ul << 10,
+        DynamicCollision = 1ul << 11,
+        GeometryBatches = 1ul << 12,
+        HostActors = 1ul << 13,
+        SceneActorCatalog = 1ul << 14,
+        MultiInstance = 1ul << 15,
+        SceneLayers = 1ul << 16,
+        SceneTransitions = 1ul << 17,
+        SceneBackgrounds = 1ul << 18,
+        SceneMaterialMetadata = 1ul << 19,
+    }
+
+    [Flags]
+    public enum DynamicCollisionFlags : uint
+    {
+        None = 0,
+        CarryPosition = 1u << 0,
+        CarryRotationY = 1u << 1,
+    }
+
+    [Flags]
+    public enum HostActorFlags : uint
+    {
+        None = 0,
+        Enabled = 1u << 0,
+        Targetable = 1u << 1,
+        Hostile = 1u << 2,
+        Hurt = 1u << 3,
+    }
+
+    public enum HostActorContactSource : uint
+    {
+        Melee = 1,
+        Arrow = 2,
+        Boomerang = 3,
+        Hookshot = 4,
+        Bomb = 5,
+    }
+
+    public enum SceneActorSource : byte
+    {
+        Scene = 0,
+        Room = 1,
+    }
+
+    public enum SceneLayer : byte
+    {
+        ChildDay = 0,
+        ChildNight = 1,
+        AdultDay = 2,
+        AdultNight = 3,
+    }
+
+    public enum WorldEventKind : uint
+    {
+        SceneExit = 1,
+        VoidSurface = 2,
+        VoidY = 3,
+    }
+
+    public enum SceneBackgroundEncoding : byte
+    {
+        None = 0,
+        Raw = 1,
+        Jpeg = 2,
+    }
+
+    public enum SceneMaterialReferenceKind : byte
+    {
+        DisplayList = 1,
+        TextureImage = 2,
+        VertexData = 3,
+        Matrix = 4,
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -163,6 +239,8 @@ namespace LibOot
         public IntPtr DebugUserData;
         public IntPtr SfxCallback;
         public IntPtr SfxUserData;
+        public uint LinkTriangleCapacity;
+        public uint SceneTriangleCapacity;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -194,6 +272,8 @@ namespace LibOot
         public float MaxFixedStepSeconds;
         public float DefaultFixedStepSeconds;
         public uint DefaultMaxSubsteps;
+        public uint MaxLinkTriangleCapacity;
+        public uint MaxSceneTriangleCapacity;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -204,6 +284,54 @@ namespace LibOot
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct HostActorState
+    {
+        public uint StructSize;
+        public uint Version;
+        public ulong UserTag;
+        public uint TypeId;
+        public HostActorFlags Flags;
+        public fixed float Position[3];
+        public fixed float FocusOffset[3];
+        public float HurtRadius;
+        public float HurtHeight;
+        public float HurtYOffset;
+        public fixed short Rotation[3];
+        public short Room;
+        public byte AttentionRange;
+        public fixed byte Reserved[3];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct EngineActorContact
+    {
+        public uint StructSize;
+        public uint Version;
+        public uint Actor;
+        public HostActorContactSource Source;
+        public ulong UserTag;
+        public uint SourceActorId;
+        public uint SimulationTick;
+        public fixed float Position[3];
+        public uint Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct SceneActorEntry
+    {
+        public uint StructSize;
+        public uint Version;
+        public short ActorId;
+        public short Params;
+        public fixed float Position[3];
+        public fixed short Rotation[3];
+        public short Room;
+        public SceneActorSource Source;
+        public byte Layer;
+        public ushort Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct WaterBox
     {
         public short XMin;
@@ -211,6 +339,28 @@ namespace LibOot
         public short XLength;
         public short ZLength;
         public short YSurface;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct DynamicCollisionTransform
+    {
+        public uint StructSize;
+        public fixed float Position[3];
+        public fixed short Rotation[3];
+        public ushort Reserved;
+        public fixed float Scale[3];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DynamicCollisionState
+    {
+        public uint StructSize;
+        public DynamicCollisionTransform Transform;
+        public int NativeBgId;
+        public byte Enabled;
+        public byte PlayerOnTop;
+        public byte PlayerAbove;
+        public byte ActorOnTop;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -393,6 +543,33 @@ namespace LibOot
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct SceneLoadOptions
+    {
+        public uint StructSize;
+        public int SceneIndex;
+        public int RoomIndex;
+        public SceneLayer Layer;
+        public fixed byte Reserved[3];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct WorldEvent
+    {
+        public uint StructSize;
+        public uint Version;
+        public ulong Sequence;
+        public WorldEventKind Kind;
+        public int SceneIndex;
+        public int RoomIndex;
+        public short ExitIndex;
+        public short EntranceIndex;
+        public byte FloorProperty;
+        public SceneLayer Layer;
+        public ushort Reserved;
+        public fixed float Position[3];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public unsafe struct EngineNaviState
     {
         public uint StructSize;
@@ -430,6 +607,9 @@ namespace LibOot
         public byte Reserved0;
         public SkeletonPose Skeleton;
         public EngineNaviState Navi;
+        public IntPtr GeometryBatches;
+        public uint GeometryBatchCount;
+        public uint GeometryBatchCapacity;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -446,6 +626,9 @@ namespace LibOot
         public uint TriangleCapacity;
         public IntPtr Alpha;   // liboot vNEXT: 1 float/vertex shade alpha (parallel to Color)
         public IntPtr TriFlags; // liboot vNEXT: 1 byte/triangle render flags (parallel to TriangleTexture)
+        public IntPtr Batches;
+        public uint BatchCount;
+        public uint BatchCapacity;
     }
 
     // liboot vNEXT: mirrors enum OoTTriangleFlags (per-triangle render flags).
@@ -457,6 +640,46 @@ namespace LibOot
         CullBack  = 1 << 1,
         AlphaTest = 1 << 2,
         Decal     = 1 << 3,
+    }
+
+    public enum GeometrySourceKind : byte
+    {
+        Link = 0,
+        Navi = 1,
+        Actor = 2,
+        SceneRoom = 3,
+    }
+
+    public enum GeometryRenderPass : byte
+    {
+        Opaque = 0,
+        Translucent = 1,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct GeometryBatch
+    {
+        public uint FirstTriangle;
+        public uint TriangleCount;
+        public ulong SourceInstance;
+        public uint MaterialKey;
+        public uint RenderMode;
+        public ushort TextureIndex;
+        public short SourceId;
+        public GeometrySourceKind SourceKind;
+        public GeometryRenderPass RenderPass;
+        public byte BlendMode;
+        public byte DepthMode;
+        public TriangleFlags TriangleFlags;
+        public byte DepthFlags;
+        public fixed byte Reserved[2];
+        public uint CombineModeHi;
+        public uint CombineModeLo;
+        public fixed float PrimitiveColor[4];
+        public fixed float EnvironmentColor[4];
+        public fixed float BaseColor[3];
+        public float ReservedColor;
+        public uint ReservedTail;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -474,6 +697,59 @@ namespace LibOot
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct SceneBackground
+    {
+        public uint StructSize;
+        public uint Version;
+        public int RoomIndex;
+        public short CameraIndex;
+        public byte AmountType;
+        public SceneBackgroundEncoding Encoding;
+        public ushort Width;
+        public ushort Height;
+        public byte Format;
+        public byte Size;
+        public ushort TlutMode;
+        public ushort TlutCount;
+        public ushort EntryFlags;
+        public uint SourceAddress;
+        public uint TlutAddress;
+        public uint SourceMetadata;
+        public IntPtr ImageBytes;
+        public UIntPtr ImageByteCount;
+        public IntPtr TlutBytes;
+        public UIntPtr TlutByteCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct SceneMaterialState
+    {
+        public uint StructSize;
+        public uint Version;
+        public ulong SimulationFrame;
+        public uint ReferenceCount;
+        public ushort SegmentMask;
+        public byte DrawConfigId;
+        public byte ReferencesTruncated;
+        public fixed byte Reserved[8];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct SceneMaterialReference
+    {
+        public uint StructSize;
+        public uint Version;
+        public uint SegmentedAddress;
+        public uint FirstTriangle;
+        public uint TriangleCount;
+        public short RoomIndex;
+        public byte Segment;
+        public SceneMaterialReferenceKind Kind;
+        public GeometryRenderPass RenderPass;
+        public fixed byte Reserved[3];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct EnginePcm
     {
         public uint StructSize;
@@ -488,8 +764,10 @@ namespace LibOot
         public const string LibraryName = "liboot";
         public const uint EngineApiVersion = 1;
         public const uint EngineLimitsVersion = 1;
-        public const float DefaultFixedStep = 1.0f / 20.0f;
+        public const float DefaultFixedStep = 3.0f / 50.0f;
         public const uint InvalidTarget = 0;
+        public const uint InvalidHostActor = 0;
+        public const uint InvalidDynamicCollision = 0;
         public const ushort AudioSequenceCatalogCount = 110;
         public const ushort AudioNoMusic = 0x7F;
         public const ushort AudioNatureRain = 0x80;
@@ -498,6 +776,13 @@ namespace LibOot
         public const uint SequenceInfoVersion = 1;
         public const uint AudioStateVersion = 1;
         public const uint SfxInfoVersion = 1;
+        public const uint HostActorStateVersion = 1;
+        public const uint HostActorContactVersion = 1;
+        public const uint SceneActorEntryVersion = 1;
+        public const uint WorldEventVersion = 1;
+        public const uint SceneBackgroundVersion = 1;
+        public const uint SceneMaterialStateVersion = 1;
+        public const uint SceneMaterialReferenceVersion = 1;
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_api_version")]
@@ -625,6 +910,11 @@ namespace LibOot
             uint frames, uint sampleRate);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_audio_render_s16")]
+        public static extern uint AudioRenderS16(short* interleavedStereo,
+            uint frames, uint sampleRate);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_audio_sfx_catalog_count")]
         public static extern int AudioSfxCatalogCount();
 
@@ -692,6 +982,101 @@ namespace LibOot
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_destroy")]
         public static extern Result EngineDestroy(IntPtr engine);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_prewarm")]
+        public static extern Result EngineAudioSequencePrewarm(IntPtr engine,
+            ushort sequenceId);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_play")]
+        public static extern Result EngineAudioSequencePlay(IntPtr engine,
+            AudioPlayer player, ushort sequenceId, ushort fadeInMs);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_nature_play")]
+        public static extern Result EngineAudioNaturePlay(IntPtr engine,
+            AudioPlayer player, byte ambienceId, ushort fadeInMs);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_stop")]
+        public static extern Result EngineAudioSequenceStop(IntPtr engine,
+            AudioPlayer player, ushort fadeOutMs);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_pause")]
+        public static extern Result EngineAudioSequencePause(IntPtr engine,
+            AudioPlayer player, byte paused);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_set_volume")]
+        public static extern Result EngineAudioSequenceSetVolume(IntPtr engine,
+            AudioPlayer player, float volume);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_set_io")]
+        public static extern Result EngineAudioSequenceSetIo(IntPtr engine,
+            AudioPlayer player, byte port, sbyte value);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_channel_set_io")]
+        public static extern Result EngineAudioChannelSetIo(IntPtr engine,
+            AudioPlayer player, byte channel, byte port, sbyte value);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sequence_get_state")]
+        public static extern Result EngineAudioSequenceGetState(IntPtr engine,
+            AudioPlayer player, ref AudioState state);
+
+        public static Result GetEngineAudioSequenceState(IntPtr engine,
+            AudioPlayer player, out AudioState state)
+        {
+            state = new AudioState();
+            state.StructSize = (uint)Marshal.SizeOf(typeof(AudioState));
+            state.Version = AudioStateVersion;
+            return EngineAudioSequenceGetState(engine, player, ref state);
+        }
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_set_master_volume")]
+        public static extern Result EngineAudioSetMasterVolume(IntPtr engine,
+            float volume);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_stop_all")]
+        public static extern Result EngineAudioStopAll(IntPtr engine,
+            ushort fadeOutMs);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_render_f32")]
+        public static extern Result EngineAudioRenderF32(IntPtr engine,
+            float* interleavedStereo, uint frames, uint sampleRate,
+            out uint framesWritten);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_render_s16")]
+        public static extern Result EngineAudioRenderS16(IntPtr engine,
+            short* interleavedStereo, uint frames, uint sampleRate,
+            out uint framesWritten);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sfx_play")]
+        public static extern Result EngineAudioSfxPlay(IntPtr engine,
+            ushort sfxId, float pan, float volume);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sfx_stop")]
+        public static extern Result EngineAudioSfxStop(IntPtr engine,
+            ushort sfxId);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_audio_sfx_stop_all")]
+        public static extern Result EngineAudioSfxStopAll(IntPtr engine);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_get_enemy_bgm")]
+        public static extern Result EngineGetEnemyBgm(IntPtr engine,
+            out byte enabled, out byte active, out float distance);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_set_callbacks")]
@@ -780,9 +1165,46 @@ namespace LibOot
             uint waterBoxCount);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_dynamic_collision_create")]
+        public static extern Result EngineDynamicCollisionCreate(IntPtr engine,
+            Surface* surfaces, uint surfaceCount,
+            ref DynamicCollisionTransform transform, DynamicCollisionFlags flags,
+            out uint handle);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_dynamic_collision_set_transform")]
+        public static extern Result EngineDynamicCollisionSetTransform(IntPtr engine,
+            uint handle, ref DynamicCollisionTransform transform);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_dynamic_collision_set_enabled")]
+        public static extern Result EngineDynamicCollisionSetEnabled(IntPtr engine,
+            uint handle, byte enabled);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_dynamic_collision_get_state")]
+        public static extern Result EngineDynamicCollisionGetState(IntPtr engine,
+            uint handle, ref DynamicCollisionState state);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_dynamic_collision_delete")]
+        public static extern Result EngineDynamicCollisionDelete(IntPtr engine,
+            uint handle);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_scene_load")]
         public static extern Result EngineSceneLoad(IntPtr engine,
             int sceneIndex, int roomIndex, out int nativeResult);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_load_ex")]
+        public static extern Result EngineSceneLoadEx(IntPtr engine,
+            ref SceneLoadOptions options, out int nativeResult);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_active_layer")]
+        public static extern Result EngineSceneGetActiveLayer(IntPtr engine,
+            out SceneLayer layer, out byte usedFallback);
 
         public static Result EngineSceneLoad(IntPtr engine, Scene scene,
             int roomIndex, out int nativeResult)
@@ -822,6 +1244,41 @@ namespace LibOot
         public static extern Result EngineSceneGetRuntime(IntPtr engine, out SceneRuntime runtime);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_exit_count")]
+        public static extern Result EngineSceneGetExitCount(IntPtr engine,
+            out uint count);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_exit")]
+        public static extern Result EngineSceneGetExit(IntPtr engine,
+            uint index, out short entranceIndex);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_world_event_poll")]
+        public static extern Result EngineWorldEventPoll(IntPtr engine,
+            ref WorldEvent worldEvent);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_background_count")]
+        public static extern Result EngineSceneGetBackgroundCount(IntPtr engine,
+            out uint count);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_background")]
+        public static extern Result EngineSceneGetBackground(IntPtr engine,
+            uint index, ref SceneBackground background);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_material_state")]
+        public static extern Result EngineSceneGetMaterialState(IntPtr engine,
+            ref SceneMaterialState state);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_material_reference")]
+        public static extern Result EngineSceneGetMaterialReference(IntPtr engine,
+            uint index, ref SceneMaterialReference reference);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_scene_get_geometry")]
         public static extern Result EngineSceneGetGeometry(IntPtr engine,
             out IntPtr geometry);
@@ -835,6 +1292,16 @@ namespace LibOot
             EntryPoint = "oot_engine_scene_get_spawn")]
         public static extern Result EngineSceneGetSpawn(IntPtr engine,
             int spawnIndex, float* position, short* yaw);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_actor_count")]
+        public static extern Result EngineSceneGetActorCount(IntPtr engine,
+            out uint count);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_scene_get_actor")]
+        public static extern Result EngineSceneGetActor(IntPtr engine,
+            uint index, ref SceneActorEntry actor);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_target_create")]
@@ -854,6 +1321,35 @@ namespace LibOot
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_targets_clear")]
         public static extern Result EngineTargetsClear(IntPtr engine);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_host_actor_create")]
+        public static extern Result EngineHostActorCreate(IntPtr engine,
+            ref HostActorState state, out uint actor);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_host_actor_update")]
+        public static extern Result EngineHostActorUpdate(IntPtr engine,
+            uint actor, ref HostActorState state);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_host_actor_get")]
+        public static extern Result EngineHostActorGet(IntPtr engine,
+            uint actor, ref HostActorState state);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_host_actor_remove")]
+        public static extern Result EngineHostActorRemove(IntPtr engine,
+            uint actor);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_host_actors_clear")]
+        public static extern Result EngineHostActorsClear(IntPtr engine);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
+            EntryPoint = "oot_engine_host_actor_poll_contact")]
+        public static extern Result EngineHostActorPollContact(IntPtr engine,
+            ref EngineActorContact contact);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl,
             EntryPoint = "oot_engine_set_render_flags")]

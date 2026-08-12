@@ -8,6 +8,19 @@ patch release must remain ABI-compatible with its minor line.
 
 ### Added
 
+- Isolated shared-library engine contexts, with interleaved multi-engine
+  execution and a capability-reported static-library singleton fallback.
+- Host-defined dynamic collision objects with generation-checked transforms,
+  enable/disable state, scene/world rebinding, and moving-platform carry.
+- Host actor records in the native attention lists, scene actor catalogs, and
+  queued melee/projectile contact events.
+- Child/adult and day/night scene layers, exit and void events, room-image
+  records, and animated-material segment metadata.
+- Configurable Link and scene geometry storage with 32-bit counts and
+  source/material/render-state batches.
+- Deterministic interleaved S16 audio output and engine-handle AudioSeq controls.
+- Windows x86-64 UCRT64 shared/static CI, install checks, and release archives.
+- Identity profiles for all eight N64 retail region/revision combinations.
 - A single ROM-free validation entry point for local and release builds.
 - Reproducibility checks for the pinned `src/decomp` snapshot.
 - Parser fuzzing entry points and binding/header parity checks.
@@ -23,6 +36,8 @@ patch release must remain ABI-compatible with its minor line.
 
 ### Changed
 
+- The selected decompilation configuration and default 60 ms simulation step
+  now match the exercised PAL 1.1 ROM.
 - Public documentation now describes liboot as a host-driven Link runtime and
   separates current capabilities from host responsibilities and limitations.
 

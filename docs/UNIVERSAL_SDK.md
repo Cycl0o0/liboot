@@ -15,11 +15,12 @@ outputs, and handle every `OoTResult`.
 - Size-tagged configuration and input structures for ABI-compatible growth.
 - Explicit result codes and human-readable `oot_engine_result_string` output.
 - Engine-owned Link geometry, actor snapshots, skeleton state, and Navi state.
-- Exact one-tick stepping plus a capped 20 Hz elapsed-time accumulator.
+- Exact one-tick stepping plus a capped PAL 60 ms elapsed-time accumulator.
 - User-data-aware debug and SFX callbacks.
 - A versioned limits/capability query for dynamic hosts.
-- Static collision, water, ROM scenes, spawn points, targets, equipment,
-  items, health, magic, texture views, and mapped gameplay-SFX/voice PCM views.
+- Static and dynamic collision, water, layered ROM scenes, transition events,
+  host actors, spawn points, targets, equipment, items, health, magic, texture
+  views, and mapped gameplay-SFX/voice PCM views.
 - A C boundary usable from C++, C#, Rust, Python, and engine plugins.
 
 [`src/liboot.h`](../src/liboot.h) remains available for existing raw-API hosts
@@ -100,16 +101,20 @@ returns `OOT_ENGINE_RESULT_NOT_AVAILABLE` for the unsafe ordering.
 
 ## Threading and instance model
 
-The wrapper serializes access and rejects callback re-entry, but the current
-decompiled core still stores game state in process-global objects. Therefore:
+The decompiled code still declares writable globals. Shared-library builds
+isolate that writable module image per `OoTEngine` and switch images under the
+wrapper guard. Engines can therefore own independent worlds and Links, but
+their calls remain serialized rather than executing concurrently. Static
+archives cannot isolate only liboot's data after the linker merges it into the
+host executable, so they advertise `OOT_ENGINE_CAPABILITY_PROCESS_SINGLETON`.
 
-- only one `OoTEngine` may exist in a process;
-- all normal calls should come from one gameplay thread;
-- callbacks must copy their payload and must not call liboot recursively;
-- do not mix raw lifecycle calls with calls on an `OoTEngine`.
-
-The opaque handle is a migration boundary, not a claim that the current core
-already supports independent simultaneous worlds.
+- Query `oot_engine_get_limits` and inspect `MULTI_INSTANCE` or
+  `PROCESS_SINGLETON` instead of inferring the model from a filename.
+- Send normal calls from one gameplay thread; concurrent calls return `BUSY`.
+- Callbacks must copy their payload and must not call liboot recursively.
+- Do not mix raw lifecycle calls with calls on an `OoTEngine`.
+- With more than one engine, use the handle-guarded engine audio functions.
+  Raw mutable `oot_audio_*` calls have no engine selector.
 
 ## Engine adapter shape
 
@@ -163,28 +168,15 @@ and optional actor stream exceeds its triangle capacity,
 valid triangles omitted from its copied geometry. Existing actor-list
 truncation remains separately reported by `actorListTruncated`.
 
-## Roadmap
+Choose frame and scene triangle capacities in `OoTEngineConfig`. Geometry
+batches split those arrays at source-entity and render-state boundaries, with
+material, texture, render-pass, blend, depth, culling, and original RDP mode
+metadata available to renderer integrations.
 
-The next engine-API milestones are:
+## Remaining engineering work
 
-1. Move every decomp/shim global behind a true context so multiple engines and
-   Links can coexist safely.
-2. Expand exact ROM profiles beyond PAL 1.1 and automate maintainer-side
-   ROM-backed evidence without placing copyrighted data in public CI.
-3. Replace the remaining fixed geometry storage with caller-selected
-   capacities and draw batches that identify entity, material, render pass,
-   blend mode, and depth mode. Published capacities and exact truncation
-   reporting now cover the current fixed buffers; alpha, alpha-test, decal,
-   and culling data are already exported.
-4. Add allocator, logger, filesystem, dynamic-collision, hit-volume, and host
-   world-event interfaces.
-5. Improve the internal AudioSeq mixer's envelopes, filters, effects and
-   reference-capture fidelity, and expose richer spatial sound-instance
-   metadata to hosts.
-6. Add Windows support, followed by maintained Unity, Godot, Unreal, Rust, and
-   Python packages. The release workflow is already configured to package Linux
-   x86-64/ARM64 and macOS builds.
-
-These are roadmap items, not promises about the current release. The exact
-working boundary is documented in the public headers and the
-[engine integration guide](ENGINE_INTEGRATION.md).
+The main unresolved work is evidence and breadth: reference-runtime fidelity
+traces, gameplay validation for ROM revisions other than PAL 1.1, more native
+actor overlays, GPU helpers for room-image compositing and animated materials,
+and maintained packages for specific game engines. The public headers and the
+[engine integration guide](ENGINE_INTEGRATION.md) define the current boundary.
