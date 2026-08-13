@@ -223,6 +223,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          install: diffutils
           pacboy: >-
             toolchain:p
             cmake:p
