@@ -2679,7 +2679,7 @@ OoTResult oot_engine_audio_sfx_play(OoTEngine *engine, uint16_t sfxId,
                                      float pan, float volume)
 {
     OoTResult result;
-    if (!isfinite(pan) || !isfinite(volume) || pan < 0.0f || pan > 1.0f ||
+    if (!isfinite(pan) || !isfinite(volume) || pan < -1.0f || pan > 1.0f ||
         volume < 0.0f || volume > 1.0f)
         return OOT_ENGINE_RESULT_INVALID_ARGUMENT;
     result = engine_lock(engine);

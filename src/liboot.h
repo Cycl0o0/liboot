@@ -663,9 +663,10 @@ extern OOT_LIB_FN void oot_link_delete( int32_t linkId );
 
 /* liboot vNEXT: move Link in place without the delete/recreate dance. Sets his
    world position and facing yaw (binary angle) directly, and snaps the
-   previous-position/home anchors so the next tick does not interpolate a huge
-   step. Does NOT reset action state; combine with oot_link_freeze for a clean
-   reposition. Returns false for a bad id or no live Link. */
+   previous-position/home anchors and clears velocity so the next tick does not
+   interpolate a huge step or retain pre-warp momentum. Does NOT reset action
+   state; combine with oot_link_freeze for a clean reposition. Returns false
+   for a bad id or no live Link. */
 extern OOT_LIB_FN bool oot_link_set_pose( int32_t linkId, float x, float y, float z, int16_t yaw );
 
 /* liboot vNEXT: freeze/unfreeze Link's simulation. While frozen, oot_link_tick

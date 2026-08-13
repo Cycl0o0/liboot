@@ -171,6 +171,14 @@ int main(void)
                  oot_engine_scene_get_dropped_triangles(NULL, &dropped) ==
                      OOT_ENGINE_RESULT_INVALID_ARGUMENT &&
                  dropped == 0u);
+    ok &= expect("checked audio accepts left pan",
+                 oot_engine_audio_sfx_play(
+                     (OoTEngine *)(uintptr_t)1u, 0u, -0.5f, 1.0f) ==
+                     OOT_ENGINE_RESULT_NOT_INITIALIZED);
+    ok &= expect("checked audio rejects pan below left",
+                 oot_engine_audio_sfx_play(
+                     (OoTEngine *)(uintptr_t)1u, 0u, -1.01f, 1.0f) ==
+                     OOT_ENGINE_RESULT_INVALID_ARGUMENT);
 
     if (!ok) {
         return 1;

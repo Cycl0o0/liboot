@@ -87,6 +87,14 @@ target_compile_definitions(oot PRIVATE
     PLATFORM_GC=0
     PLATFORM_IQUE=0
     F3DEX_GBI_2
+    # Keep decompilation-era compatibility functions private to liboot. Static
+    # hosts such as SM64 ports commonly provide functions with the original
+    # libultra names, so leaving those names global makes otherwise valid
+    # integrations fail at the final link step.
+    osCreateMesgQueue=liboot_internal_osCreateMesgQueue
+    osSendMesg=liboot_internal_osSendMesg
+    osRecvMesg=liboot_internal_osRecvMesg
+    guPerspective=liboot_internal_guPerspective
 )
 if(BUILD_SHARED_LIBS)
     target_compile_definitions(oot PRIVATE LIBOOT_MULTI_INSTANCE=1)
@@ -203,6 +211,21 @@ if(BUILD_TESTING)
         NAME engine-init-contract
         COMMAND liboot_engine_init_test
     )
+
+    if(NOT BUILD_SHARED_LIBS)
+        # Static game ports often carry their own libultra compatibility
+        # layer. This executable deliberately owns the four names that have
+        # collided in real hosts and must still link the complete engine.
+        add_executable(liboot_static_namespace_test
+            test/static_namespace_test.c
+        )
+        liboot_configure_test(liboot_static_namespace_test)
+        target_link_libraries(liboot_static_namespace_test PRIVATE liboot::oot)
+        add_test(
+            NAME static-host-symbol-namespace
+            COMMAND liboot_static_namespace_test
+        )
+    endif()
 
     # rom_util.c is deliberately tested directly because it is an internal,
     # hidden-symbol parser rather than part of the installed ABI.

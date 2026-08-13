@@ -72,6 +72,10 @@ The exported target supplies the installed include path, so source uses
 it is not a system location. The installation also provides `liboot.pc`, so a
 non-CMake host can use `pkg-config --cflags --libs liboot`.
 
+The static archive namespaces its internal libultra message-queue and
+perspective helpers. A host may provide the original N64 function names without
+creating duplicate symbols at link time.
+
 For an engine plugin, ship the native library beside the executable or in the
 engine's platform-specific native-library directory. The CMake project has
 platform-aware shared/static target definitions, but published prebuilt
@@ -415,10 +419,10 @@ flags, lock-on and water. Useful details:
   offset and remain independent of host pointer addresses and ASLR.
 
 `oot_engine_link_set_pose` directly changes position and facing without
-recreating Link. It intentionally preserves the current action state; pair it
-with `oot_engine_link_freeze` when the host needs a clean warp. Deleting and
-recreating Link remains useful for a complete gameplay reset and invalidates
-helper actors and host targets.
+recreating Link. It clears linear and per-axis velocity but intentionally
+preserves the current action state; pair it with `oot_engine_link_freeze` when
+the host needs a clean warp. Deleting and recreating Link remains useful for a
+complete gameplay reset and invalidates helper actors and host targets.
 
 Equipment combinations are clamped by the game. In particular, adult and
 child have different valid swords, shields and items. The wrapper returns
@@ -651,6 +655,7 @@ OoTResult result = oot_engine_audio_render_s16(
 Use `oot_audio_sequence_count/name/get_info` for the 110-entry music selector
 and `oot_audio_sfx_catalog_count/get` for all seven SFX banks; these catalog
 queries are immutable. Start catalog sounds through `oot_engine_audio_sfx_play`.
+Its pan range is `-1.0` (left) through `0.0` (center) to `1.0` (right).
 The four players mirror main BGM, fanfare, SFX and secondary BGM. Serialize all
 calls on an engine against its render callback; concurrent calls report
 `OOT_ENGINE_RESULT_BUSY`. Shared builds preserve separate AudioSeq state per

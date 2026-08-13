@@ -888,8 +888,9 @@ void oot_link_delete( int32_t linkId )
     s_linkFrozen = false;
 }
 
-/* liboot vNEXT: reposition Link in place. Snap prevPos/home to the new spot so
-   the next update does not treat the move as a one-frame velocity spike. */
+/* liboot vNEXT: reposition Link in place. Snap prevPos/home to the new spot and
+   clear the old motion so a host-owned warp cannot leak pre-warp momentum into
+   the destination. The current action is intentionally preserved. */
 bool oot_link_set_pose( int32_t linkId, float x, float y, float z, int16_t yaw )
 {
     if( linkId != 0 || !s_state.player ) return false;
@@ -899,8 +900,17 @@ bool oot_link_set_pose( int32_t linkId, float x, float y, float z, int16_t yaw )
     player->actor.world.pos.z = z;
     player->actor.prevPos = player->actor.world.pos;
     player->actor.home.pos = player->actor.world.pos;
+    player->actor.velocity.x = 0.0f;
+    player->actor.velocity.y = 0.0f;
+    player->actor.velocity.z = 0.0f;
+    player->actor.speed = 0.0f;
+    player->speedXZ = 0.0f;
+    player->pushedSpeed = 0.0f;
     player->actor.shape.rot.y = yaw;
     player->actor.world.rot.y = yaw;
+    player->yaw = yaw;
+    player->parallelYaw = yaw;
+    player->pushedYaw = yaw;
     liboot_world_events_observe_pose( y );
     return true;
 }
