@@ -9,7 +9,12 @@ OOT_DEFINES := -DLIBOOT_HOST_BUILD=1 -D_LANGUAGE_C -DNON_MATCHING -DAVOID_UB -DD
                -DosCreateMesgQueue=liboot_internal_osCreateMesgQueue \
                -DosSendMesg=liboot_internal_osSendMesg \
                -DosRecvMesg=liboot_internal_osRecvMesg \
-               -DguPerspective=liboot_internal_guPerspective
+               -DguPerspective=liboot_internal_guPerspective \
+               -DguMtxF2L=liboot_internal_guMtxF2L \
+               -DguMtxIdent=liboot_internal_guMtxIdent \
+               -DguMtxIdentF=liboot_internal_guMtxIdentF \
+               -Dsins=liboot_internal_sins \
+               -Dcoss=liboot_internal_coss
 CFLAGS  := -g -Wall -Wno-unused-function -Wno-unused-variable \
            -fno-strict-aliasing -funsigned-char -fPIC -fvisibility=hidden \
            -DOOT_LIB_EXPORT -DLIBOOT_MULTI_INSTANCE=1 $(OOT_DEFINES) \

@@ -95,6 +95,11 @@ target_compile_definitions(oot PRIVATE
     osSendMesg=liboot_internal_osSendMesg
     osRecvMesg=liboot_internal_osRecvMesg
     guPerspective=liboot_internal_guPerspective
+    guMtxF2L=liboot_internal_guMtxF2L
+    guMtxIdent=liboot_internal_guMtxIdent
+    guMtxIdentF=liboot_internal_guMtxIdentF
+    sins=liboot_internal_sins
+    coss=liboot_internal_coss
 )
 if(BUILD_SHARED_LIBS)
     target_compile_definitions(oot PRIVATE LIBOOT_MULTI_INSTANCE=1)
@@ -214,8 +219,8 @@ if(BUILD_TESTING)
 
     if(NOT BUILD_SHARED_LIBS)
         # Static game ports often carry their own libultra compatibility
-        # layer. This executable deliberately owns the four names that have
-        # collided in real hosts and must still link the complete engine.
+        # layer. This executable deliberately owns names that have collided
+        # in real hosts and must still link the complete engine.
         add_executable(liboot_static_namespace_test
             test/static_namespace_test.c
         )

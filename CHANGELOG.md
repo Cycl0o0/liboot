@@ -39,7 +39,8 @@ patch release must remain ABI-compatible with its minor line.
 - The selected decompilation configuration and default 60 ms simulation step
   now match the exercised PAL 1.1 ROM.
 - Internal libultra compatibility functions now use liboot-prefixed symbols,
-  preventing collisions when a static host supplies the same N64 functions.
+  preventing collisions when a static host supplies the same N64 functions,
+  including the incompatible `sins` and `coss` helpers used by SM64 ports.
 - Public documentation now describes liboot as a host-driven Link runtime and
   separates current capabilities from host responsibilities and limitations.
 
