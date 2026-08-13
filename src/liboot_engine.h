@@ -466,8 +466,9 @@ extern OOT_LIB_FN OoTResult oot_engine_link_damage(OoTEngine *engine, int16_t am
 extern OOT_LIB_FN OoTResult oot_engine_link_set_magic(OoTEngine *engine,
                                                       uint8_t level, int16_t amount);
 
-/* liboot vNEXT: move Link in place (position + facing yaw) without recreating
-   him; combine with oot_engine_link_freeze for a clean reposition. */
+/* liboot vNEXT: move Link in place (position + facing yaw), clearing velocity
+   without recreating him; combine with oot_engine_link_freeze for a clean
+   reposition while preserving action state. */
 extern OOT_LIB_FN OoTResult oot_engine_link_set_pose(OoTEngine *engine,
                                                      float x, float y, float z, int16_t yaw);
 /* liboot vNEXT: freeze/unfreeze Link's simulation; a frozen Link still renders. */
@@ -671,6 +672,7 @@ extern OOT_LIB_FN OoTResult oot_engine_audio_render_f32(
 extern OOT_LIB_FN OoTResult oot_engine_audio_render_s16(
     OoTEngine *engine, int16_t *stereo, uint32_t frames, uint32_t sampleRate,
     uint32_t *outFrames);
+/* pan is -1 (left) through 0 (center) to 1 (right). */
 extern OOT_LIB_FN OoTResult oot_engine_audio_sfx_play(
     OoTEngine *engine, uint16_t sfxId, float pan, float volume);
 extern OOT_LIB_FN OoTResult oot_engine_audio_sfx_stop(

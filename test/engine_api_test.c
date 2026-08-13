@@ -650,6 +650,31 @@ int main(int argc, char **argv)
         input.stickY = 0.0f;
     }
 
+    if (frame_is_sane(frame)) {
+        float poseX = frame->link.position[0];
+        float poseY = frame->link.position[1];
+        float poseZ = frame->link.position[2];
+
+        ok &= expect_result("freeze before clean pose",
+                            oot_engine_link_freeze(engine, 1u),
+                            OOT_ENGINE_RESULT_OK);
+        ok &= expect_result("clean Link pose", oot_engine_link_set_pose(
+                                engine, poseX, poseY, poseZ, 0x1234),
+                            OOT_ENGINE_RESULT_OK);
+        ok &= expect_result("clean pose frame",
+                            oot_engine_step(engine, &input, &frame),
+                            OOT_ENGINE_RESULT_OK);
+        ok &= frame_is_sane(frame) &&
+              fabsf(frame->link.velocity[0]) < 0.001f &&
+              fabsf(frame->link.velocity[1]) < 0.001f &&
+              fabsf(frame->link.velocity[2]) < 0.001f &&
+              fabsf(frame->link.linearVelocity) < 0.001f &&
+              frame->link.faceAngle == 0x1234;
+        ok &= expect_result("unfreeze after clean pose",
+                            oot_engine_link_freeze(engine, 0u),
+                            OOT_ENGINE_RESULT_OK);
+    }
+
     ok &= expect_result("child age", oot_engine_link_set_age(engine, OOT_AGE_CHILD),
                         OOT_ENGINE_RESULT_OK);
     ok &= expect_result("stale target", oot_engine_target_move(

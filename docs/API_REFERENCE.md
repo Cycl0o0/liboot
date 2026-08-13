@@ -608,6 +608,9 @@ Immutable sequence/SFX catalogs and the Ocarina song table remain on the
 low-level API. Raw mutable audio calls have no engine selector and must not be
 used as controls for an `OoTEngine`.
 
+`oot_engine_audio_sfx_play` uses pan `-1.0` for full left, `0.0` for center,
+and `1.0` for full right; volume is `0.0..1.0`.
+
 ---
 
 # Low-level API (`liboot.h`)

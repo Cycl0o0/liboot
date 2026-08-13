@@ -38,11 +38,18 @@ patch release must remain ABI-compatible with its minor line.
 
 - The selected decompilation configuration and default 60 ms simulation step
   now match the exercised PAL 1.1 ROM.
+- Internal libultra compatibility functions now use liboot-prefixed symbols,
+  preventing collisions when a static host supplies the same N64 functions,
+  including the incompatible `sins` and `coss` helpers used by SM64 ports.
 - Public documentation now describes liboot as a host-driven Link runtime and
   separates current capabilities from host responsibilities and limitations.
 
 ### Fixed
 
+- The checked engine SFX player now accepts the documented negative pan range,
+  so callers can place sounds left of center.
+- Repositioning Link now clears pre-warp momentum and synchronizes his internal
+  facing fields, preventing movement from leaking across host-owned warps.
 - Relocatable `pkg-config` metadata and installed-package checks now support
   multi-component library directories, custom include and documentation roots,
   install-prefix overrides, and multi-config CMake generators.

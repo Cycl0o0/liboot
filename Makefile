@@ -5,7 +5,16 @@ PYTHON3 ?= python3
 OOT_DEFINES := -DLIBOOT_HOST_BUILD=1 -D_LANGUAGE_C -DNON_MATCHING -DAVOID_UB -DDEBUG_FEATURES=0 \
                -DOOT_VERSION=PAL_1_1 -DOOT_REVISION=1 \
                -DPLATFORM_N64=1 -DPLATFORM_GC=0 -DPLATFORM_IQUE=0 \
-               -DF3DEX_GBI_2
+               -DF3DEX_GBI_2 \
+               -DosCreateMesgQueue=liboot_internal_osCreateMesgQueue \
+               -DosSendMesg=liboot_internal_osSendMesg \
+               -DosRecvMesg=liboot_internal_osRecvMesg \
+               -DguPerspective=liboot_internal_guPerspective \
+               -DguMtxF2L=liboot_internal_guMtxF2L \
+               -DguMtxIdent=liboot_internal_guMtxIdent \
+               -DguMtxIdentF=liboot_internal_guMtxIdentF \
+               -Dsins=liboot_internal_sins \
+               -Dcoss=liboot_internal_coss
 CFLAGS  := -g -Wall -Wno-unused-function -Wno-unused-variable \
            -fno-strict-aliasing -funsigned-char -fPIC -fvisibility=hidden \
            -DOOT_LIB_EXPORT -DLIBOOT_MULTI_INSTANCE=1 $(OOT_DEFINES) \
